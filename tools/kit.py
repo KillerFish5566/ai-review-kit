@@ -46,7 +46,9 @@ HOOK_TAG = ".ai-review/kit/kit.py"          # 辨識「我們的」hook 條目
 BLOCK_BEGIN_RE = re.compile(r"^<!-- ai-review-kit:begin[^\n]*-->[ \t]*\r?\n?", re.M)
 BLOCK_END = "<!-- ai-review-kit:end -->"
 BLOCK_END_RE = re.compile(r"^<!-- ai-review-kit:end -->[ \t]*\r?\n?", re.M)
-GITIGNORE_LINES = ["# ai-review-kit（本機資料，不提交）", ".ai-review/.cache/", ".ai-review/.backup/"]
+GITIGNORE_LINES = ["# ai-review-kit（本機資料，不提交）", ".ai-review/.cache/", ".ai-review/.backup/", ".ai-review/local.json"]
+LOCAL_KEYS = ("python", "python_args", "source")   # 每台電腦不同、可能含使用者名稱 → 存 local.json，不進版控
+HOOK_KIT_PY = "${CLAUDE_PROJECT_DIR}/.ai-review/kit/kit.py"   # Claude Code 執行 hook 前會展開（2026-09-18 實測 exec 形式可用）
 EXCLUDE_DIRS = {".git", ".ai-review", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
                 "bin", "obj", ".mypy_cache", ".pytest_cache", ".tox", "target"}
 STATUS_LABELS = {
@@ -203,10 +205,11 @@ class Source:
             shutil.rmtree(self._tmp, ignore_errors=True)
 
 
-def resolve_source(args, manifest=None, required=True):
+def resolve_source(args, manifest=None, required=True, local=None):
     s = getattr(args, "source", None)
-    if not s and manifest and manifest.get("source") and Path(manifest["source"]).exists():
-        s = manifest["source"]
+    remembered = (local or {}).get("source") or (manifest or {}).get("source")
+    if not s and remembered and Path(remembered).exists():
+        s = remembered
     if not s:
         r = source_root_from_here()
         if r:
@@ -249,15 +252,32 @@ def load_manifest(target):
     return load_json(manifest_path(target), None)
 
 
-def new_manifest(version, source, python, python_args):
+def local_path(target):
+    return Path(target) / ".ai-review" / "local.json"
+
+
+def load_local(target, manifest=None):
+    """本機設定（直譯器、來源路徑）。0.1.0 存在 manifest 裡，讀得到就沿用當作舊值。"""
+    loc = load_json(local_path(target), None)
+    if isinstance(loc, dict):
+        return loc
+    return {k: manifest[k] for k in LOCAL_KEYS if manifest and k in manifest}
+
+
+def save_local(target, manifest, python, python_args, source):
+    dump_json(local_path(target), {"python": python, "python_args": list(python_args),
+                                   "source": str(source) if source else None,
+                                   "_note": "本機設定，不進版控（每台電腦不同）。換電腦後跑 relink 重建。"})
+    for k in LOCAL_KEYS:
+        manifest.pop(k, None)
+
+
+def new_manifest(version):
     return {
         "kit": KIT_NAME,
         "kit_version": version,
         "installed_at": now_str(),
         "updated_at": now_str(),
-        "source": str(source),
-        "python": python,
-        "python_args": python_args,
         "files": {},
         "blocks": {},
         "runs": [],
@@ -314,7 +334,7 @@ def is_our_hook_group(group):
     return False
 
 
-def claude_hook_groups(python, python_args, kit_py):
+def claude_hook_groups(python, python_args, kit_py=HOOK_KIT_PY):
     def entry(event, msg):
         return {"matcher": "", "hooks": [{
             "type": "command",
@@ -372,12 +392,33 @@ def strip_our_hooks(settings):
     return settings
 
 
+def portable_python():
+    """寫進 hook 的預設直譯器：用 PATH 上的通用命令，不寫本機絕對路徑（會進版控、可能含使用者名稱）。"""
+    if os.name == "nt":
+        if shutil.which("py"):
+            return "py", ["-3"]
+    elif shutil.which("python3"):
+        return "python3", []
+    return sys.executable, []
+
+
 def resolve_python(args):
     spec = getattr(args, "python", None)
     if spec:
         parts = shlex.split(spec, posix=(os.name != "nt"))
         return parts[0], parts[1:]
-    return sys.executable, []
+    return portable_python()
+
+
+def warn_if_personal_path(python):
+    try:
+        home = Path.home().resolve()
+        pp = Path(python)
+        if pp.is_absolute() and (pp.resolve() == home or home in pp.resolve().parents):
+            print(f"⚠ 直譯器路徑在使用者資料夾內（{python}），會寫進 .claude/settings.json 並進版控，路徑含使用者名稱。"
+                  f"建議改用 --python \"py -3\"（Windows）或 --python python3。")
+    except (ValueError, OSError, RuntimeError):
+        pass
 
 
 # ---------------------------------------------------------------- 計畫（三方比對）
@@ -500,12 +541,15 @@ def do_install_or_update(args, mode):
     if mode == "update" and not manifest:
         print("[提示] 專案尚未安裝，改以 install 流程處理。")
         mode = "install"
-    src = resolve_source(args, manifest)
+    local = load_local(target, manifest)
+    src = resolve_source(args, manifest, local=local)
     take = set(getattr(args, "take_source", None) or [])
     preview = bool(getattr(args, "preview", False) or getattr(args, "dry_run", False))
     python, python_args = resolve_python(args)
-    if manifest and not getattr(args, "python", None) and manifest.get("python"):
-        python, python_args = manifest["python"], manifest.get("python_args", [])
+    # 沿用上次選的直譯器（local.json）；0.1.0 自動記在 manifest 的本機絕對路徑不沿用——那是 sys.executable，不是使用者選的
+    if not getattr(args, "python", None) and local_path(target).exists() and local.get("python"):
+        python, python_args = local["python"], local.get("python_args", [])
+    warn_if_personal_path(python)
 
     actions = plan(src, target, manifest, take)
     conflicts = [a for a in actions if a["action"].startswith("conflict")]
@@ -526,7 +570,7 @@ def do_install_or_update(args, mode):
         return 0
 
     r = Run(target)
-    new_manifest_obj = manifest or new_manifest(src.version, src.root, python, python_args)
+    new_manifest_obj = manifest or new_manifest(src.version)
     files_rec = dict(new_manifest_obj.get("files", {}))
     blocks_rec = dict(new_manifest_obj.get("blocks", {}))
 
@@ -550,13 +594,12 @@ def do_install_or_update(args, mode):
                 blocks_rec[name] = a["new_hash"]
 
     # hooks：Claude Code
-    kit_py_abs = str((target / ".ai-review" / "kit" / "kit.py").resolve())
     sp = target / ".claude" / "settings.json"
     cur_settings = load_json(sp, None) if sp.exists() else None
     if sp.exists() and cur_settings is None:
         print(f"⚠ {sp} 不是有效 JSON，略過 hook 接線（請手動處理）")
     else:
-        merged = merge_hooks(dict(cur_settings or {}), claude_hook_groups(python, python_args, kit_py_abs))
+        merged = merge_hooks(dict(cur_settings or {}), claude_hook_groups(python, python_args))
         new_txt = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
         if not sp.exists() or norm_nl(read_text(sp)).strip() != new_txt.strip():
             r.write(".claude/settings.json", text=new_txt)
@@ -579,9 +622,13 @@ def do_install_or_update(args, mode):
         t = norm_nl(gi_txt)
         if t and not t.endswith("\n"):
             t += "\n"
-        if t.strip():
-            t += "\n"
-        t += "\n".join([GITIGNORE_LINES[0]] + missing) + "\n"
+        tail = [l for l in t.splitlines() if l.strip()][-1:]
+        if tail and tail[0] in GITIGNORE_LINES:   # 檔尾就是我們的區段 → 接在後面，不重複標題
+            t += "\n".join(missing) + "\n"
+        else:
+            if t.strip():
+                t += "\n"
+            t += "\n".join([GITIGNORE_LINES[0]] + missing) + "\n"
         r.write(".gitignore", text=t.replace("\n", nl) if nl != "\n" else t)
     # 資料夾與佔位
     for d in ("handoffs", "reviews", "fixes"):
@@ -590,9 +637,11 @@ def do_install_or_update(args, mode):
             r.write(keep, text="")
     # manifest
     new_manifest_obj.update({
-        "kit_version": src.version, "updated_at": now_str(), "source": str(src.root),
-        "python": python, "python_args": python_args, "files": files_rec, "blocks": blocks_rec,
+        "kit_version": src.version, "updated_at": now_str(), "files": files_rec, "blocks": blocks_rec,
     })
+    if not local_path(target).exists():
+        r.created.append(".ai-review/local.json")
+    save_local(target, new_manifest_obj, python, python_args, src.given.resolve() if src._tmp else src.root)
     if mode == "install":
         new_manifest_obj["installed_at"] = now_str()
     runs = list(new_manifest_obj.get("runs", []))
@@ -619,22 +668,23 @@ def do_relink(args):
     if not manifest:
         raise SystemExit("尚未安裝（找不到 .ai-review/kit-version.json）。請用 install --source。")
     python, python_args = resolve_python(args)
+    warn_if_personal_path(python)
+    local = load_local(target, manifest)
     r = Run(target)
-    kit_py_abs = str((target / ".ai-review" / "kit" / "kit.py").resolve())
     sp = target / ".claude" / "settings.json"
     cur = load_json(sp, {}) if sp.exists() else {}
-    merged = merge_hooks(dict(cur or {}), claude_hook_groups(python, python_args, kit_py_abs))
+    merged = merge_hooks(dict(cur or {}), claude_hook_groups(python, python_args))
     r.write(".claude/settings.json", text=json.dumps(merged, ensure_ascii=False, indent=2) + "\n")
     cp = target / ".codex" / "hooks.json"
     curc = load_json(cp, {}) if cp.exists() else {}
     merged = merge_hooks(dict(curc or {}), codex_hook_groups(python, python_args))
     r.write(".codex/hooks.json", text=json.dumps(merged, ensure_ascii=False, indent=2) + "\n")
-    manifest["python"], manifest["python_args"] = python, python_args
+    save_local(target, manifest, python, python_args, local.get("source"))
     manifest["updated_at"] = now_str()
     rec = r.record(); rec["action"] = "relink"
     manifest.setdefault("runs", []).append(rec)
     dump_json(manifest_path(target), manifest)
-    print(f"已重新接線：直譯器 {python} {' '.join(python_args)}；kit.py {kit_py_abs}")
+    print(f"已重新接線：直譯器 {python} {' '.join(python_args)}；kit.py {HOOK_KIT_PY}")
     print("hooks 要重開 Claude Code 才載入。")
     return 0
 
@@ -1178,10 +1228,10 @@ def do_status(args):
     # 來源版本
     src = None
     try:
-        src = resolve_source(args, manifest, required=False)
+        src = resolve_source(args, manifest, required=False, local=load_local(target, manifest))
     except SystemExit:
         src = None
-    info["source"] = str(src.root) if src else manifest.get("source")
+    info["source"] = str(src.root) if src else load_local(target, manifest).get("source")
     info["source_version"] = src.version if src else None
     info["source_reachable"] = bool(src)
     # 檔案狀態
@@ -1201,7 +1251,7 @@ def do_status(args):
     s = load_json(sp, {}) if sp.exists() else {}
     hooks = (s or {}).get("hooks", {}) if isinstance(s, dict) else {}
     info["claude_hooks"] = {ev: any(is_our_hook_group(g) for g in (hooks.get(ev) or []) if isinstance(g, dict)) for ev in ("SessionStart", "Stop")}
-    py = manifest.get("python")
+    py = load_local(target, manifest).get("python")
     info["python"] = py
     info["python_ok"] = bool(py) and (Path(py).exists() or shutil.which(py) is not None)
     cp = target / ".codex" / "hooks.json"
@@ -1223,7 +1273,7 @@ def do_status(args):
         cmp = "相同" if src.version == info["kit_version"] else f"來源較新：{src.version}" if src.version > info["kit_version"] else f"來源較舊：{src.version}"
         print(f"來源：{src.root}（{cmp}）")
     else:
-        print(f"來源：{manifest.get('source')}（目前不可達；未檢查更新）")
+        print(f"來源：{info['source']}（目前不可達；未檢查更新）")
     print(f"檔案：{len(files)} 個受管；使用者改過 {len(changed)} 個" + (f"（{', '.join(changed)}）" if changed else "") +
           (f"；遺失 {len(missing)} 個（{', '.join(missing)}）" if missing else ""))
     print(f"直譯器：{py}（{'可用' if info['python_ok'] else '找不到 → 請執行 relink'}）")

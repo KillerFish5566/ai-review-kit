@@ -3,6 +3,18 @@
 版本規則：patch＝修 bug 不改行為；minor＝加功能且舊專案資料相容；major＝專案資料需轉換或使用方式改變。
 每次發版：改 `VERSION`、在這裡加一段、`kit.py pack` 重打離線包。
 
+## 0.1.1 — 2026-09-19
+
+修正：安裝後進版控的檔案會帶出本機路徑（含 Windows 使用者名稱）。
+
+- 直譯器與套件來源路徑改存 `.ai-review/local.json`（自動加進 `.gitignore`），`kit-version.json` 不再記這兩項。
+- hook 預設直譯器改用 PATH 上的通用命令（Windows `py -3`、其他 `python3`），不再寫 `sys.executable` 的絕對路徑；`--python` 指定的值照用，路徑在使用者資料夾內會提出警告。
+- Claude Code hook 的 kit.py 路徑改寫 `${CLAUDE_PROJECT_DIR}/.ai-review/kit/kit.py`（實測 exec 形式會展開），不再寫專案的絕對路徑。
+- 從 0.1.0 升級：舊欄位自動搬走；0.1.0 自動記下的絕對直譯器路徑不沿用，改用通用命令。
+- 從 zip 安裝時記住的來源改為 zip 檔本身（原本記到會被清掉的暫存資料夾）。
+- `.gitignore` 補新行時接在既有區段後面，不再重複標題。
+- 測試 67 → 78 項（T12 補一項、新增 T13～T15）。
+
 ## 0.1.0 — 2026-09-18
 
 第一版。

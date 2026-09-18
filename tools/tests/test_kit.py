@@ -320,6 +320,55 @@ def main():
     rc, out, err = kit("status", "--target", str(p1))
     check("T12 status 可讀且列出 hooks/skills", rc == 0 and "Skills" in out and "狀態：" in out, out[-400:])
 
+    loc = json.loads(read(p1 / ".ai-review/local.json"))
+    check("T12 relink 把直譯器記在 local.json、manifest 不再有", loc["python"] == "py" and loc["python_args"] == ["-3"]
+          and "python" not in json.loads(read(p1 / ".ai-review/kit-version.json")), json.dumps(loc))
+
+    # ---------------- T13 進版控的檔不含本機路徑（0.1.1）
+    home = str(Path.home())
+    p6 = new_git_project(root, "p6-portable")
+    rc, out, err = kit("install", "--target", str(p6))
+    tracked = [".ai-review/kit-version.json", ".claude/settings.json", ".codex/hooks.json"]
+    leaks = [t for t in tracked
+             if home.lower() in read(p6 / t).lower().replace("\\\\", "\\") or str(p6).lower() in read(p6 / t).lower().replace("\\\\", "\\")]
+    check("T13 manifest／settings／codex hooks 不含家目錄或專案絕對路徑", rc == 0 and not leaks, str(leaks))
+    s = json.loads(read(p6 / ".claude/settings.json"))
+    args0 = s["hooks"]["SessionStart"][0]["hooks"][0]["args"]
+    check("T13 hook 用 ${CLAUDE_PROJECT_DIR} 指 kit.py", "${CLAUDE_PROJECT_DIR}/.ai-review/kit/kit.py" in args0, json.dumps(args0))
+    m = json.loads(read(p6 / ".ai-review/kit-version.json"))
+    check("T13 manifest 不含 python／source", not ({"python", "python_args", "source"} & set(m)), str(list(m)))
+    check("T13 local.json 存在且被 .gitignore 排除",
+          (p6 / ".ai-review/local.json").exists() and ".ai-review/local.json" in read(p6 / ".gitignore"))
+    rc, out, err = git("check-ignore", ".ai-review/local.json", cwd=p6)
+    check("T13 git 確認 local.json 被忽略", rc == 0, out + err)
+    rc, out, err = kit("status", "--target", str(p6))
+    check("T13 status 讀 local.json 的直譯器", rc == 0 and "直譯器：" in out and "找不到" not in out, out[-300:])
+
+    # ---------------- T14 從 0.1.0 的安裝紀錄升級（舊欄位搬走、不沿用自動記下的絕對路徑）
+    p7 = new_git_project(root, "p7-migrate")
+    rc, out, err = kit("install", "--target", str(p7))
+    mp = p7 / ".ai-review/kit-version.json"
+    m = json.loads(read(mp))
+    m.update({"python": sys.executable, "python_args": [], "source": str(KIT_ROOT)})
+    write(mp, json.dumps(m, ensure_ascii=False, indent=2))
+    (p7 / ".ai-review/local.json").unlink()
+    write(p7 / ".gitignore", read(p7 / ".gitignore").replace(".ai-review/local.json\n", ""))   # 模擬 0.1.0 的 .gitignore
+    rc, out, err = kit("update", "--target", str(p7))
+    m = json.loads(read(mp))
+    loc = json.loads(read(p7 / ".ai-review/local.json"))
+    h = json.loads(read(p7 / ".claude/settings.json"))["hooks"]["SessionStart"][0]["hooks"][0]
+    check("T14 升級後舊欄位搬到 local.json", rc == 0 and not ({"python", "source"} & set(m)) and loc.get("source"), err[-300:])
+    gi = read(p7 / ".gitignore")
+    check("T14 .gitignore 補新行時不重複標題", gi.count("# ai-review-kit") == 1 and ".ai-review/local.json" in gi, gi)
+    check("T14 不沿用 0.1.0 自動記下的絕對路徑", h["command"] != sys.executable or not Path(sys.executable).is_relative_to(Path.home()),
+          json.dumps(h))
+
+    # ---------------- T15 restore 會一併移除本次新建的 local.json
+    p8 = new_git_project(root, "p8-restore-local")
+    kit("install", "--target", str(p8))
+    rc, out, err = kit("restore", "--target", str(p8), "--yes")
+    check("T15 restore 安裝後 local.json 也移除", rc == 0 and not (p8 / ".ai-review/local.json").exists(), out[-300:])
+
     # ---------------- 總結
     fails = [r for r in RESULTS if not r[1]]
     print(f"\n共 {len(RESULTS)} 項，通過 {len(RESULTS) - len(fails)}，失敗 {len(fails)}")

@@ -56,8 +56,8 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 - 放 Skills 到 `.claude/skills/`（Claude）與 `.agents/skills/`（Codex）
 - 在 `CLAUDE.md`、`AGENTS.md` **附加**一個管理區塊（`<!-- ai-review-kit:begin … end -->`），區塊外的內容不動
 - 在 `.claude/settings.json` 合併兩個 hook（SessionStart、Stop），其他設定不動；`.codex/hooks.json` 加一個 SessionStart（Codex 端需在 `/hooks` 信任後才會跑）
-- `.gitignore` 加 `.ai-review/.cache/` 與 `.ai-review/.backup/`
-- 記錄到 `.ai-review/kit-version.json`；改動前的檔案備份到 `.ai-review/.backup/<時間>/`
+- `.gitignore` 加 `.ai-review/.cache/`、`.ai-review/.backup/`、`.ai-review/local.json`
+- 記錄到 `.ai-review/kit-version.json`（進版控，不含本機路徑）；這台電腦的直譯器與套件來源記在 `.ai-review/local.json`（不進版控）；改動前的檔案備份到 `.ai-review/.backup/<時間>/`
 
 然後在專案根目錄開 Claude Code（hooks 要重開才載入），執行 `/safety-setup`。
 
@@ -69,7 +69,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 | `update --source <資料夾或 zip> [--preview]` | 更新；三方比對（安裝時／目前／新來源），使用者改過的保留，兩邊都改的列為衝突不覆蓋，`--take-source <路徑>` 才採用來源 |
 | `status` | 套件版本、來源版本、使用者改過哪些檔、hooks／Skills／入口是否就位、目前流程狀態 |
 | `restore --yes` | 還原最近一次安裝／更新前的狀態（先列清單）；可逐次往前還原 |
-| `relink [--python "py -3"]` | 換電腦後重寫 hook 的直譯器路徑 |
+| `relink [--python "py -3"]` | 換電腦後重寫 hook 的直譯器、重建 `local.json` |
 | `pack` | 打離線 zip 到 `dist/` |
 | `check-update --url <VERSION 檔網址>` | 只查版本號，不自動更新；沒網路就如實說「未檢查更新」 |
 

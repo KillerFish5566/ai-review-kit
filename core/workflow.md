@@ -30,7 +30,8 @@
 │  ├ handoffs/H-*.md         交接報告（開發 AI 寫）
 │  ├ reviews/R-*.md          獨立審查報告（審查 AI 寫）
 │  ├ fixes/F-*.md            修正報告（開發 AI 寫）
-│  ├ kit-version.json        安裝紀錄：套件版本、檔案雜湊、備份
+│  ├ kit-version.json        安裝紀錄：套件版本、檔案雜湊、備份（不含本機路徑）
+│  ├ local.json              這台電腦的直譯器與套件來源（不 commit）
 │  ├ .cache/                 hook 的暫存（不 commit）
 │  └ .backup/                安裝／更新前的備份（不 commit）
 ├ .claude/skills/            /safety-setup、/review-ready、/review-fix
