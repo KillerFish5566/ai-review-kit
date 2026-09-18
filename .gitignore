@@ -1,3 +1,13 @@
 dist/
 __pycache__/
 *.pyc
+
+# 防手滑：套件本身不會產生這些檔，但一律排除
+.env
+.env.*
+*.local.*
+credentials*
+secrets.*
+.vscode/
+.idea/
+.claude/settings.local.json
