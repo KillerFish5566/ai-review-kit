@@ -1,0 +1,23 @@
+# ai-review-kit：在 CI 跑合併關卡（範例，尚未在真實 repo 驗證）
+# 放到 <專案>/.github/workflows/ai-review-gate.yml。
+# 通過條件：最新交接已有獨立審查「no-blocking-found」，且 checkout 內容的指紋 = 交接目標指紋。
+# 注意：
+# - 指紋用 git tree 雜湊（不含 .ai-review/）。本機與 CI 的 core.autocrlf 設定不同時可能不一致；遇到就先在本機確認，必要時停用本 workflow。
+# - 這只是 CI 檢查；要真的擋住合併，還要在 GitHub 的 branch protection 把這個 job 設為 required。
+name: ai-review-gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: ai-review-kit gate
+        run: python3 .ai-review/kit/kit.py gate
