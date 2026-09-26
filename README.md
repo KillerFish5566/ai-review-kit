@@ -105,4 +105,4 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 ```
 py -3 tools/tests/test_kit.py
 ```
-在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update。測試資料夾不會自動刪除。
+在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、預覽列出實裝會寫的每一個檔、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update。測試資料夾不會自動刪除。
