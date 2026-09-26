@@ -392,6 +392,67 @@ def main():
             check(f"T16 預覽列出 {key}", False, out[-600:])
     check("T16 預覽附 hook 內容差異", "差異：.claude/settings.json" in out, out[-600:])
 
+    # ---------------- T17 指紋不寫進專案的 git 物件庫（Codex 沙箱不准寫 .git 也能算）（0.2.0）
+    p10 = new_git_project(root, "p10-codex-review")
+    kit("install", "--target", str(p10))
+    p10kit = p10 / ".ai-review/kit/kit.py"
+    write(p10 / "new_untracked.py", "print('not yet in any object store')\n")
+
+    def loose_objects(d):
+        return sorted(str(f) for f in (d / ".git/objects").rglob("*") if f.is_file() and len(f.parent.name) == 2)
+
+    before = loose_objects(p10)
+    rc, fp1, err = kit("fingerprint", cwd=p10, script=p10kit)
+    check("T17 fingerprint 不新增 .git/objects 裡的物件", rc == 0 and loose_objects(p10) == before, err[-300:])
+    rc, out, err = kit("snapshot", "--json", cwd=p10, script=p10kit)
+    snap = json.loads(out) if rc == 0 else {}
+    check("T17 snapshot 指紋與 fingerprint 相同、快照參照照建",
+          snap.get("target") == fp1.strip() and (snap.get("snapshot_ref") or "").startswith("refs/ai-review/"), out[-300:] + err[-300:])
+
+    # ---------------- T18 codex-review：命令形狀、環境、紀錄、拒絕條件（用假 codex）（0.2.0）
+    shutil.copy(KIT_ROOT / "templates/config.md", p10 / ".ai-review/config.md")
+    H = snap["id"]
+    write(p10 / f".ai-review/handoffs/{H}.md", front(H, "handoff", target=snap["target"], snapshot_ref=snap["snapshot_ref"],
+                                                       head=snap["head"], base=snap["base"], recheck_of="", scope="t18"))
+    fake_py = HERE / "fakecodex.py"
+    if os.name == "nt":
+        fake = root / "fakecodex.cmd"
+        write(fake, f'@"{PY}" "{fake_py}" %*\r\n')
+    else:
+        fake = root / "fakecodex"
+        write(fake, f'#!/bin/sh\nexec "{PY}" "{fake_py}" "$@"\n')
+        fake.chmod(0o755)
+    rc, out, err = kit("codex-review", "--print", "--codex", str(fake), cwd=p10, script=p10kit)
+    check("T18 --print 列出工作區沙箱命令、不含繞過旗標與 -m",
+          rc == 0 and "-s workspace-write" in out and "bypass" not in out and " -m " not in out
+          and f"$independent-review {H}" in out, out[-500:] + err[-300:])
+    rc, out, err = kit("codex-review", "--codex", str(root / "no-such-codex.exe"), cwd=p10, script=p10kit)
+    check("T18 找不到 codex → exit 3 並給手動退路", rc == 3 and "codex-start.md" in out, out[-300:])
+    rc, out, err = kit("codex-review", "--codex", str(fake), cwd=p10, script=p10kit)
+    rec = json.loads(read(p10 / ".ai-review/.cache/fake-record.json")) if (p10 / ".ai-review/.cache/fake-record.json").exists() else {}
+    done = json.loads(read(p10 / f".ai-review/.cache/codex-{H}.done")) if (p10 / f".ai-review/.cache/codex-{H}.done").exists() else {}
+    check("T18 跑完 exit 0、.done 記下審查編號與結論",
+          rc == 0 and done.get("review") == "R-20990101-0000" and done.get("verdict") == "no-blocking-found" and done.get("exit") == 0,
+          out[-400:] + err[-300:] + json.dumps(done))
+    argv = rec.get("argv", [])
+    check("T18 假 codex 收到 exec -C <專案> -s workspace-write 與交接編號",
+          argv[:1] == ["exec"] and "-C" in argv and Path(argv[argv.index("-C") + 1]).resolve() == p10.resolve()
+          and argv[argv.index("-s") + 1] == "workspace-write" and argv[-1] == f"$independent-review {H}", json.dumps(argv))
+    tmpdir = (p10 / ".ai-review/.cache/tmp").resolve()
+    envr = rec.get("env", {})
+    check("T18 TMP／TEMP 指到 .ai-review/.cache/tmp、AI_REVIEW_PYTHON 是實體檔",
+          all(envr.get(k) and Path(envr[k]).resolve() == tmpdir for k in ("TMP", "TEMP"))
+          and envr.get("AI_REVIEW_PYTHON") and Path(envr["AI_REVIEW_PYTHON"]).is_file(), json.dumps(envr))
+    check("T18 紀錄檔存在、執行中標記已清", (p10 / f".ai-review/.cache/codex-{H}.log").exists()
+          and not (p10 / f".ai-review/.cache/codex-{H}.running").exists())
+    st = json.loads(read(p10 / ".ai-review/state.json"))
+    check("T18 跑完狀態已推導為 no-blocking-found", st["status"] == "no-blocking-found", json.dumps(st)[-300:])
+    rc, out, err = kit("codex-review", "--codex", str(fake), cwd=p10, script=p10kit)
+    check("T18 已有獨立審查 → 不重跑（exit 1）", rc == 1 and "--again" in out, out[-300:])
+    write(p10 / "app.py", read(p10 / "app.py") + "\n# changed after handoff\n")
+    rc, out, err = kit("codex-review", "--codex", str(fake), "--again", cwd=p10, script=p10kit)
+    check("T18 交接後又改過 → 不啟動（exit 1）", rc == 1 and "不符" in out, out[-300:])
+
     # ---------------- 總結
     fails = [r for r in RESULTS if not r[1]]
     print(f"\n共 {len(RESULTS)} 項，通過 {len(RESULTS) - len(fails)}，失敗 {len(fails)}")

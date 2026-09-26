@@ -21,7 +21,7 @@ argument-hint: "[R-xxx 審查編號；省略則取最新一份]"
 5. **寫修正報告**：`py -3 .ai-review/kit/kit.py new-id F` 取編號，複製範本到 `.ai-review/fixes/<F-id>.md`，`review` 填 R 編號。
 6. **重新交接**：執行 `/review-ready --recheck <R-id>` 的完整流程（snapshot → checks → 新的 H 報告）。把新的 H 編號填回修正報告的 `handoff` 欄。
 7. **推導狀態**：`py -3 .ai-review/kit/kit.py state` → 應為「待複查」。
-8. **回報使用者**（白話）：處理幾項、修了幾項、不成立幾項（各一句理由）、要他決定幾項（列出來），下一步是再讓 Codex 審一次。固定一句：**目前為待複查，不是通過。**
+8. **回報使用者**（白話）：處理幾項、修了幾項、不成立幾項（各一句理由）、要他決定幾項（列出來），下一步是 Codex 複查（第 6 步的 /review-ready 會在背景啟動，走退路時請使用者自己開 Codex）。固定一句：**目前為待複查，不是通過。**
 
 ## 不可以
 

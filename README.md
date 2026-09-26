@@ -10,15 +10,15 @@
 ## 一頁看懂
 
 ```
-你                    Claude Code（開發 AI）              Codex（審查 AI，你手動開）
+你                    Claude Code（開發 AI）              Codex（審查 AI，Claude 在背景啟動）
 │ /safety-setup ───→ 盤點專案，寫 .ai-review/config.md
 │ 開發、驗收功能
 │ /review-ready ───→ 釘版本（指紋＋git 快照）
 │                    跑 config.md 的檢查、照實記錄
 │                    寫交接 H-xxx.md → 狀態「待獨立審查」
-│ 開 Codex，打 $independent-review ───────────────────→ 核對指紋、讀 diff 與完整程式碼
-│                                                        寫審查 R-xxx.md（needs-fix / no-blocking-found）
-│ /review-fix R-xxx → 逐項修、寫 F-xxx.md、重新交接 → 狀態「待複查」→ 再讓 Codex 審
+│                    kit.py codex-review（背景）─────────→ 核對指紋、讀 diff 與完整程式碼
+│                    ←──────── 跑完通知，回報結論 ────── 寫審查 R-xxx.md（needs-fix / no-blocking-found）
+│ /review-fix R-xxx → 逐項修、寫 F-xxx.md、重新交接 → 狀態「待複查」→ 再背景啟動 Codex 複查
 │ 合併前：py -3 .ai-review/kit/kit.py gate
 ```
 
@@ -70,6 +70,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 | `status` | 套件版本、來源版本、使用者改過哪些檔、hooks／Skills／入口是否就位、目前流程狀態 |
 | `restore --yes` | 還原最近一次安裝／更新前的狀態（先列清單）；可逐次往前還原 |
 | `relink [--python "py -3"]` | 換電腦後重寫 hook 的直譯器、重建 `local.json` |
+| `codex-review [--detach] [--print]` | 在專案裡執行：用工作區沙箱啟動 Codex 審查最新交接，紀錄寫 `.ai-review/.cache/codex-<H>.log`，結束寫 `.done`；找不到 codex 時 exit 3 並提示手動退路 |
 | `pack` | 打離線 zip 到 `dist/` |
 | `check-update --url <VERSION 檔網址>` | 只查版本號，不自動更新；沒網路就如實說「未檢查更新」 |
 
@@ -79,7 +80,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 |---|---|
 | 新專案一次 | `/safety-setup` |
 | 一個變更做完 | `/review-ready` |
-| 要獨立審查 | 開 Codex，打 `$independent-review`（見 `docs/codex-start.md`） |
+| 要獨立審查 | 不用做事：`/review-ready` 最後會在背景啟動 Codex，跑完回報。想自己開就說一聲（`docs/codex-start.md`） |
 | 審查說要修 | `/review-fix R-編號` |
 | 合併／部署前 | `py -3 .ai-review/kit/kit.py gate` |
 | 想看狀態 | `py -3 .ai-review/kit/kit.py status` |
@@ -97,7 +98,8 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 - `gate` 是本地檢查，可以被略過。要強制，得在 GitHub 設 branch protection 並讓 CI 跑 gate（`templates/ci/github-actions-gate.yml` 是範例，尚未在真實 repo 驗證）。
 - 狀態檔與報告裡的「通過」文字不是安全證明；證明是「哪個指紋、誰審、看了什麼、怎麼查」。
 - 非 git 專案沒有快照參照，指紋改用檔案雜湊。
-- Codex 端的 Skill 與 hook 依官方文件位置放置，但本套件的驗證未實際啟動 Codex（第一版由使用者手動啟動），列為未驗證。
+- Codex 的 `$independent-review` Skill 已在實際專案用 `codex exec` 背景跑過多輪（2026-09-25 起）；Codex 端的 SessionStart hook 仍未驗證。自動化測試用假的 codex 驗證命令形狀與紀錄，不會真的呼叫 Codex。
+- `codex-review` 依賴本機的 Codex 登入與額度；額度不足時不會有審查報告，要照 `config.md` 第 6 節記下哪份交接尚未審。
 - 指紋在 CI 與本機可能因 CRLF 正規化設定不同而不一致（`core.autocrlf` 混用時）；遇到就以本機為準並在 CI 停用 gate。
 
 ## 驗證
@@ -105,4 +107,4 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 ```
 py -3 tools/tests/test_kit.py
 ```
-在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、預覽列出實裝會寫的每一個檔、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update。測試資料夾不會自動刪除。
+在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、預覽列出實裝會寫的每一個檔、指紋不寫進專案 git 物件庫、`codex-review` 的命令形狀／環境／拒絕條件（假 codex）、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update。測試資料夾不會自動刪除。

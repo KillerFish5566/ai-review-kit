@@ -6,16 +6,16 @@
 ## 0. 三句話
 
 1. 開發 AI（通常是 Claude Code）做完**一個能獨立理解的變更**後，執行「交接」：把被審內容釘死成一個版本指紋、跑完檢查、寫成交接報告。
-2. **另一個 AI**（Codex，由使用者手動啟動）讀真正的 diff 與程式碼，寫獨立審查報告。開發 AI 的自查永遠不算獨立審查。
+2. **另一個 AI**（Codex；交接後由開發 AI 用 `kit.py codex-review` 在背景啟動，或使用者手動啟動）讀真正的 diff 與程式碼，寫獨立審查報告。開發 AI 的自查永遠不算獨立審查。
 3. 狀態不是誰宣告的，是由「交接／審查／修正」三種報告加上目前程式碼的指紋**推導**出來的。程式碼一變，舊結果就失效。
 
 ## 1. 角色
 
 | 角色 | 做什麼 | 不做什麼 |
 |---|---|---|
-| 開發 AI（Claude Code） | 實作、跑檢查、寫交接報告、依審查報告修正 | 不宣告「獨立審查通過」 |
+| 開發 AI（Claude Code） | 實作、跑檢查、寫交接報告、背景啟動 Codex 審查、依審查報告修正 | 不宣告「獨立審查通過」、不改審查報告 |
 | 審查 AI（Codex） | 讀 diff 與完整相關程式碼、寫審查報告 | 預設不改實作 |
-| 使用者 | 驗收功能、啟動 Codex、決定要不要合併 | 不需要自己看懂漏洞 |
+| 使用者 | 驗收功能、決定要不要修與要不要合併（退路時自己開 Codex） | 不需要自己看懂漏洞 |
 
 ## 2. 專案裡的檔案
 
@@ -83,14 +83,14 @@ R.reviewer 是開發 AI 自己（self/claude） → 不算，視同沒有審查
    → kit.py checks --run（逐條執行 config.md 的檢查命令，照實記錄）
    → handoffs/H-xxx.md
    → 狀態：待獨立審查
-使用者開 Codex，輸入 $independent-review（或貼 docs/codex-start.md 的那句話）
-   → Codex 核對指紋、讀 diff 與完整程式碼
+開發 AI 背景執行 kit.py codex-review（退路：使用者開 Codex，輸入 $independent-review，見 docs/codex-start.md）
+   → Codex（工作區沙箱）核對指紋、讀 diff 與完整程式碼
    → reviews/R-xxx.md（verdict: needs-fix 或 no-blocking-found）
    → 狀態：需修正 ／ 本次範圍內未發現阻擋問題
 若需修正：/review-fix
    → 逐項處理、針對性驗證 → fixes/F-xxx.md
    → 重新 snapshot、重新交接（recheck_of 指向 R-xxx）
-   → 狀態：待複查 → 再讓 Codex 審一次
+   → 狀態：待複查 → 再跑一次 codex-review（/review-ready 的最後一步）
 合併／部署前：kit.py gate
 ```
 
@@ -113,6 +113,9 @@ py -3 .ai-review/kit/kit.py snapshot      建交接快照（通常由 /review-re
 py -3 .ai-review/kit/kit.py checks --run  執行 config.md 的檢查命令並記錄
 py -3 .ai-review/kit/kit.py verify        核對目前指紋與最新交接
 py -3 .ai-review/kit/kit.py state         重新推導 state.json
+py -3 .ai-review/kit/kit.py codex-review  啟動 Codex 審查最新交接（等跑完；--detach 丟背景、--print 只看命令）
 ```
 
 macOS／Linux 把 `py -3` 換成 `python3`。
+
+`codex-review` 的固定做法：`codex exec -C <專案> -s workspace-write "$independent-review <H-id>"`；TMP／TEMP 指 `.ai-review/.cache/tmp`（Codex 沙箱不准寫系統暫存）；環境變數 `AI_REVIEW_PYTHON` 給沙箱用的實體直譯器（Windows 的 `py` 是應用程式別名，沙箱啟動不了）；不加 `-m`（模型照 Codex 設定檔）、永遠不用 `--dangerously-bypass-approvals-and-sandbox`；紀錄寫 `.ai-review/.cache/codex-<H-id>.log`，結束寫 `.done`（exit、審查編號、結論）。指紋計算的新物件寫在暫存物件庫，所以 Codex 不需要 `.git` 的寫入權。

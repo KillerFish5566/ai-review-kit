@@ -1,6 +1,6 @@
 ---
 name: review-ready
-description: 在一個完整、可獨立理解的變更做完後執行：釘住待審版本（指紋＋git 快照）、逐條執行 config.md 的檢查命令並照實記錄、寫交接報告到 .ai-review/handoffs/，狀態變為「待獨立審查」。修正審查發現後重新交接也用這個（加 --recheck R-編號）。
+description: 在一個完整、可獨立理解的變更做完後執行：釘住待審版本（指紋＋git 快照）、逐條執行 config.md 的檢查命令並照實記錄、寫交接報告到 .ai-review/handoffs/，狀態變為「待獨立審查」，再於背景啟動 Codex 獨立審查。修正審查發現後重新交接也用這個（加 --recheck R-編號）。
 argument-hint: "[--recheck R-xxx] [--base <ref>] [一句話描述本次變更範圍]"
 ---
 
@@ -36,8 +36,21 @@ argument-hint: "[--recheck R-xxx] [--base <ref>] [一句話描述本次變更範
    - 改了什麼（三句）
    - 檢查結果：幾條通過、幾條失敗或沒跑、原因
    - 已知風險一到三條
-   - 下一步：「在專案根目錄開 Codex，輸入 `$independent-review`」（或貼 `.ai-review/kit/docs/codex-start.md` 的那句話）
+   - 下一步：「我已在背景啟動 Codex 獨立審查，跑完會自動回報」（第 10 步）；第 10 步走退路時改成「請在專案根目錄開 Codex，輸入 `$independent-review`」
    - 固定一句：**本次為開發 AI 自查，尚未獨立審查。**
+10. **啟動獨立審查（背景）**：
+   ```
+   py -3 .ai-review/kit/kit.py codex-review
+   ```
+   - Claude Code 裡用 Bash 工具的 `run_in_background` 執行（指令會等 Codex 跑完才結束，結束時你會收到通知）；不是在 Claude Code 裡就加 `--detach`，它會丟到背景立刻返回。
+   - 這個指令固定用工作區沙箱（`-s workspace-write`）、TMP 指到 `.ai-review/.cache/tmp`、模型照 Codex 設定檔；**不得**自己改用 `--dangerously-bypass-approvals-and-sandbox` 或加 `-m`。
+   - 它會拒絕：交接後程式又改過（重新交接）、這份交接已有審查（真的要重審才加 `--again`）、同一份正在跑。
+   - exit 3＝找不到 codex → 走退路：請使用者在專案根目錄開 Codex 輸入 `$independent-review`（`.ai-review/kit/docs/codex-start.md`）。
+   - 使用者說「這次我自己開 Codex」也走退路，不要硬跑。
+11. **收結果**（收到背景結束通知後）：讀它印的審查編號與結論，再讀 `.ai-review/reviews/<R-id>.md`。
+   - `needs-fix` → 白話列出阻擋項，問使用者是否 `/review-fix <R-id>`。
+   - `no-blocking-found` → 告訴使用者可以進行合併前的 `gate`。
+   - 沒產生報告 → 讀 `.ai-review/.cache/codex-<H-id>.log` 找原因（額度不足、登入過期…）；額度不足就在 `config.md` 第 6 節記「哪份交接尚未審、為什麼」，等額度恢復再跑。
 
 ## 不可以
 

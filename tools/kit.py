@@ -5,7 +5,7 @@ ai-review-kit 工具（純 Python 標準函式庫，Python 3.9+）
 
 兩種身分、同一支檔案：
   A. 放在套件來源 `ai-review-kit/tools/kit.py`  → 管理指令：install / update / restore / status / pack / check-update
-  B. 被安裝到專案 `<專案>/.ai-review/kit/kit.py` → 專案指令：status / snapshot / checks / state / verify / gate / new-id / hook / relink
+  B. 被安裝到專案 `<專案>/.ai-review/kit/kit.py` → 專案指令：status / snapshot / checks / state / verify / gate / new-id / codex-review / hook / relink
      （B 也能跑 update，來源用 --source 指定，或用安裝紀錄裡記住的來源路徑）
 
 設計要點
@@ -798,10 +798,19 @@ def is_git_root(target):
         return False
 
 
-def git_tree_fingerprint(target):
+def git_tree_fingerprint(target, persist=False):
+    """persist=False：新物件寫進暫存物件庫（原物件庫只讀不寫），沙箱不准寫 .git 也能算（Codex 審查用）。
+    persist=True：寫進專案的 .git，給 snapshot 接著 commit-tree 建快照參照。"""
     with tempfile.TemporaryDirectory() as td:
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = str(Path(td) / "index")
+        if not persist:
+            rc, out, err = run(["git", "rev-parse", "--path-format=absolute", "--git-path", "objects"], cwd=target)
+            if rc != 0:
+                raise RuntimeError("git rev-parse 失敗：" + err.strip())
+            (Path(td) / "objects").mkdir()
+            env["GIT_OBJECT_DIRECTORY"] = str(Path(td) / "objects")
+            env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = out.strip()
         rc, _, err = run(["git", "read-tree", "--empty"], cwd=target, env=env)
         if rc != 0:
             raise RuntimeError("git read-tree 失敗：" + err.strip())
@@ -827,9 +836,9 @@ def file_fingerprint(target):
     return "sha256:" + h.hexdigest()[:40]
 
 
-def fingerprint(target):
+def fingerprint(target, persist=False):
     if is_git_root(target):
-        return git_tree_fingerprint(target), True
+        return git_tree_fingerprint(target, persist), True
     return file_fingerprint(target), False
 
 
@@ -884,7 +893,7 @@ def do_snapshot(args):
     if not (target / ".ai-review").is_dir():
         raise SystemExit("找不到 .ai-review/：請先安裝套件。")
     hid = next_id(target, "H")
-    fp, is_git = fingerprint(target)
+    fp, is_git = fingerprint(target, persist=True)
     info = {"id": hid, "target": fp, "git": is_git, "snapshot_ref": None, "head": None, "branch": None,
             "base": None, "base_how": None, "modified": None, "untracked": None, "created": now_str()}
     if is_git:
@@ -1085,7 +1094,7 @@ def derive_state(target, with_fp=True):
     st["bound_status"] = bound_status
     # 未結案
     if status == "pending-review":
-        st["open_items"].append(f"交接 {H.get('id')} 等待獨立審查（Codex：$independent-review）")
+        st["open_items"].append(f"交接 {H.get('id')} 等待獨立審查（kit.py codex-review 背景啟動，或手動在 Codex 打 $independent-review）")
     elif status == "pending-recheck":
         st["open_items"].append(f"交接 {H.get('id')} 為修正後重交（回應 {H.get('recheck_of')}），等待複查")
     elif status == "needs-fix":
@@ -1176,6 +1185,135 @@ def do_new_id(args):
     target = resolve_target(args)
     print(next_id(target, args.prefix))
     return 0
+
+
+# ---------------------------------------------------------------- 背景啟動 Codex 審查（0.2.0）
+HID_RE = re.compile(r"^H-[0-9]{8}-[0-9]{4}(-[0-9]+)?$")
+
+
+def real_python():
+    """給 Codex 沙箱用的直譯器：目前這支 Python 的實體路徑。
+    Windows 的 py／python 若是 WindowsApps 裡的應用程式別名，沙箱帳號啟動不了（2026-09-26 實測 CreateProcess 錯誤 2）。"""
+    exe = Path(sys.executable).resolve()
+    alias = "windowsapps" in str(exe).lower()
+    return exe, alias
+
+
+def codex_review_cmd(codex, target, hid, is_git):
+    # 固定形狀：工作區可寫沙箱、不覆寫模型（照 Codex 設定檔）、永遠不加 --dangerously-bypass-approvals-and-sandbox
+    cmd = [codex, "exec", "-C", str(target), "-s", "workspace-write"]
+    if not is_git:
+        cmd.append("--skip-git-repo-check")
+    cmd.append(f"$independent-review {hid}")
+    return cmd
+
+
+def do_codex_review(args):
+    target = resolve_target(args)
+    if not (target / ".ai-review").is_dir():
+        raise SystemExit("找不到 .ai-review/：請先安裝套件。")
+    hs = reports(target, "handoffs")
+    if not hs:
+        print("沒有交接報告：先執行 /review-ready 產生交接，再啟動審查。")
+        return 2
+    hid = getattr(args, "handoff", None)
+    H = next((h for h in hs if h.get("id") == hid), None) if hid else hs[-1]
+    if not H:
+        print(f"找不到交接 {hid}")
+        return 2
+    hid = H["id"]
+    if not HID_RE.match(hid):
+        print(f"交接編號格式不對（{hid}），不啟動。")
+        return 2
+    if H is not hs[-1]:
+        print(f"交接 {hid} 不是最新的一份（最新是 {hs[-1]['id']}），狀態只看最新交接，不啟動。")
+        return 2
+    st = derive_state(target)
+    if not st["fresh"]:
+        print(f"目前程式碼與交接 {hid} 的目標指紋不符（交接後又改過），Codex 會判 invalid。先重新 /review-ready。")
+        return 1
+    if st.get("review") and not args.again:
+        r = st["review"]
+        print(f"交接 {hid} 已有獨立審查 {r.get('id')}（結論 {r.get('verdict')}）。要重審請加 --again。")
+        return 1
+
+    cache = target / ".ai-review" / ".cache"
+    tmp = cache / "tmp"
+    log, done, running = (cache / f"codex-{hid}.{ext}" for ext in ("log", "done", "running"))
+    timeout_s = max(1, args.timeout) * 60
+    if running.exists() and not args.again:
+        age = time.time() - running.stat().st_mtime
+        if age < timeout_s:
+            print(f"交接 {hid} 的審查已在執行（{int(age // 60)} 分鐘前啟動，紀錄 {rel(log, target)}）。確定沒在跑才加 --again。")
+            return 1
+
+    codex = shutil.which(args.codex or "codex")
+    if not codex:
+        print("找不到 codex 指令（PATH 上沒有）。退路：在專案根目錄開 Codex，輸入 `$independent-review`"
+              "（說明見 .ai-review/kit/docs/codex-start.md）。")
+        return 3
+    py, alias = real_python()
+    env = os.environ.copy()
+    for k in ("TMP", "TEMP", "TMPDIR"):       # Codex 沙箱不准寫系統暫存
+        env[k] = str(tmp)
+    env["AI_REVIEW_PYTHON"] = str(py)          # independent-review 技能在 py 無法啟動時改用它
+    env["PATH"] = str(py.parent) + os.pathsep + env.get("PATH", "")
+    cmd = codex_review_cmd(codex, target, hid, st["git"])
+
+    if args.print_only:
+        print("將執行：" + " ".join(shlex.quote(c) for c in cmd))
+        print(f"工作目錄：{target}")
+        print(f"TMP／TEMP：{tmp}")
+        print(f"AI_REVIEW_PYTHON：{py}" + ("（⚠️ 這是應用程式別名，沙箱可能啟動不了）" if alias else ""))
+        print(f"紀錄：{rel(log, target)}  結束標記：{rel(done, target)}")
+        return 0
+
+    tmp.mkdir(parents=True, exist_ok=True)
+    if args.detach:
+        child = [sys.executable, str(Path(__file__).resolve()), "codex-review", "--target", str(target),
+                 "--handoff", hid, "--timeout", str(args.timeout)]
+        if args.codex:
+            child += ["--codex", args.codex]
+        if args.again:
+            child.append("--again")
+        kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(target)}
+        if os.name == "nt":
+            kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kw["start_new_session"] = True
+        subprocess.Popen(child, **kw)
+        print(f"已在背景啟動 Codex 審查交接 {hid}。")
+        print(f"進度看 {rel(log, target)}；結束時會寫 {rel(done, target)}，之後用 status 看結論。")
+        return 0
+
+    if alias:
+        print(f"⚠️ 目前的 Python 是應用程式別名（{py}），Codex 沙箱裡的指紋核對可能失敗。")
+    done.unlink(missing_ok=True)
+    started = now_str()
+    write_text(running, json.dumps({"handoff": hid, "pid": os.getpid(), "started": started}, ensure_ascii=False) + "\n")
+    print(f"Codex 審查交接 {hid} 開始（{started}），紀錄寫到 {rel(log, target)}")
+    try:
+        with open(log, "wb") as lf:
+            proc = subprocess.Popen(cmd, cwd=str(target), env=env, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT)
+            try:
+                code = proc.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                code = "timeout"
+    finally:
+        running.unlink(missing_ok=True)
+    out = derive_and_write_state(target, quiet=True)
+    r = out.get("review") if (out.get("handoff") or {}).get("id") == hid else None
+    dump_json(done, {"handoff": hid, "exit": code, "started": started, "finished": now_str(),
+                     "review": r.get("id") if r else None, "verdict": r.get("verdict") if r else None})
+    print(f"Codex 結束（exit {code}）。")
+    if r:
+        print(f"審查報告：{r.get('id')}  結論 {r.get('verdict')}")
+        print_state(out)
+        return 0
+    print(f"沒有找到對應交接 {hid} 的審查報告。看 {rel(log, target)} 找原因；額度不足時照 config.md 第 6 節記下來。")
+    return 1
 
 
 # ---------------------------------------------------------------- hooks
@@ -1404,6 +1542,13 @@ def build_parser():
     s = sub.add_parser("verify", help="核對目前指紋與交接目標"); common(s); s.add_argument("--handoff")
     s = sub.add_parser("gate", help="合併／部署前關卡"); common(s)
     s = sub.add_parser("new-id", help="產生報告編號"); common(s); s.add_argument("prefix", choices=["H", "R", "F"])
+    s = sub.add_parser("codex-review", help="啟動 Codex 獨立審查最新交接（紀錄寫 .ai-review/.cache/）"); common(s)
+    s.add_argument("--handoff", help="交接編號（預設最新；只接受最新那份）")
+    s.add_argument("--detach", action="store_true", help="丟到背景就返回（預設：等 Codex 跑完再返回）")
+    s.add_argument("--print", action="store_true", dest="print_only", help="只印出將執行的命令與環境，不啟動")
+    s.add_argument("--again", action="store_true", help="已有審查或看起來仍在執行時，仍要再跑一次")
+    s.add_argument("--timeout", type=int, default=60, help="逾時分鐘數（預設 60）")
+    s.add_argument("--codex", help="codex 執行檔（預設 PATH 上的 codex）")
     s = sub.add_parser("hook", help="hook 進入點"); common(s); s.add_argument("event", choices=["session-start", "stop"]); s.add_argument("--agent", default="claude")
     s = sub.add_parser("pack", help="打離線 zip"); s.add_argument("--out"); s.add_argument("--source")
     s = sub.add_parser("check-update", help="檢查線上版本（選用，不自動更新）"); common(s); s.add_argument("--url")
@@ -1444,6 +1589,8 @@ def main(argv=None):
         return do_gate(args)
     if args.cmd == "new-id":
         return do_new_id(args)
+    if args.cmd == "codex-review":
+        return do_codex_review(args)
     if args.cmd == "hook":
         return do_hook(args)
     if args.cmd == "pack":

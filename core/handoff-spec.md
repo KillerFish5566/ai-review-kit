@@ -23,7 +23,8 @@
 4. **重大變更的設計檢查**：如果這次動到登入、權限、敏感資料、對外介面，先照 `security-checklist.md` 第 2 節做設計層檢查，把結論寫進第 6 節。
 5. **寫交接報告**：複製 `templates/handoff.md` 到 `.ai-review/handoffs/<id>.md`，填滿每一節。
 6. **推導狀態**：`py -3 .ai-review/kit/kit.py state`，確認顯示「待獨立審查」（或「待複查」）。
-7. **告訴使用者**（三到五句白話）：改了什麼、檢查結果、有什麼風險、下一步是開 Codex 審查。
+7. **告訴使用者**（三到五句白話）：改了什麼、檢查結果、有什麼風險、下一步是 Codex 審查。
+8. **啟動審查**：`py -3 .ai-review/kit/kit.py codex-review` 在背景跑（Claude Code 用背景執行；其他環境加 `--detach`）。找不到 codex（exit 3）或使用者要自己開時，退回手動：`docs/codex-start.md`。
 
 ## 3. 報告必填內容
 

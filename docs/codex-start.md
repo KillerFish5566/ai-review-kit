@@ -1,4 +1,6 @@
-# 讓 Codex 接手獨立審查（手動啟動）
+# 讓 Codex 接手獨立審查（手動啟動＝退路）
+
+平常不用看這份：`/review-ready` 最後會用 `py -3 .ai-review/kit/kit.py codex-review` 在背景啟動 Codex。找不到 codex、或你想自己看 Codex 怎麼審時，才照下面手動做。
 
 在**專案根目錄**開終端機：
 

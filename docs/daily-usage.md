@@ -6,9 +6,9 @@
 |---|---|---|
 | 新專案第一次 | Claude Code | `/safety-setup` |
 | 一個完整變更做完 | Claude Code | `/review-ready`（可加一句範圍描述） |
-| 要獨立審查 | 終端機開 `codex` | `$independent-review` |
+| 要獨立審查 | 不用做事 | `/review-ready` 最後會在背景啟動 Codex，跑完回報（想自己開：終端機 `codex` → `$independent-review`） |
 | 審查說要修 | Claude Code | `/review-fix R-編號` |
-| 修完要複查 | 終端機開 `codex` | `$independent-review`（它會自己看到是複查） |
+| 修完要複查 | 不用做事 | `/review-fix` 會重新交接並在背景啟動複查 |
 | 合併／部署前 | 終端機 | `py -3 .ai-review/kit/kit.py gate` |
 | 不確定現在什麼狀態 | 終端機 | `py -3 .ai-review/kit/kit.py status` |
 
@@ -19,9 +19,9 @@
 | 看到 | 意思 | 你做什麼 |
 |---|---|---|
 | 尚未準備 | 沒交接，或交接後程式又改了 | 做完再 `/review-ready` |
-| 待獨立審查 | 交接好了 | 開 Codex |
+| 待獨立審查 | 交接好了，Codex 在背景審或還沒啟動 | 等回報；沒在跑就請 Claude 執行 `codex-review` |
 | 需修正 | Codex 找到阻擋級問題 | `/review-fix` |
-| 待複查 | 修好重交了 | 再開 Codex |
+| 待複查 | 修好重交了 | 等複查回報 |
 | 本次範圍內未發現阻擋問題 | 這個版本 Codex 沒找到阻擋問題 | 可以合併（`gate` 會確認指紋還相符） |
 
 ## 哪些檔要 commit
@@ -42,5 +42,6 @@ py -3 .ai-review/kit/kit.py relink
 
 - **hook 開頭沒出現**：hooks 是啟動時載入，改完設定要重開 Claude Code；`status` 看接線是否就位；Python 路徑不對就 `relink`。
 - **Codex 不認得 `$independent-review`**：確認在專案根目錄啟動、`.agents/skills/independent-review/SKILL.md` 存在；不行就貼 `codex-start.md` 那句話。
-- **Codex 沙箱唯讀寫不了報告**：它會把報告印出來，你存到 `.ai-review/reviews/R-編號.md`，回 Claude Code 跑 `py -3 .ai-review/kit/kit.py state`。
+- **背景審查沒有產生報告**：看 `.ai-review/.cache/codex-<H-編號>.log`（常見：額度不足、登入過期）。額度不足就在 `config.md` 第 6 節記下哪份交接尚未審，恢復後再跑 `py -3 .ai-review/kit/kit.py codex-review`。
+- **Codex 沙箱唯讀寫不了報告**（手動用 `--sandbox read-only` 時）：它會把報告印出來，你存到 `.ai-review/reviews/R-編號.md`，回 Claude Code 跑 `py -3 .ai-review/kit/kit.py state`。
 - **想看某次審的是哪個版本**：交接檔頭的 `snapshot_ref`，`git diff <base>..refs/ai-review/H-xxx`。
