@@ -479,12 +479,73 @@ def plan(src, target, manifest, take):
     return actions
 
 
-def print_plan(actions, target, show_diff=False):
+def plan_config(target, python, python_args):
+    """套件檔以外、安裝時會一併寫入的設定與紀錄檔。預覽要完整列出（hook 與設定檔屬於要先徵得同意的變更）。
+    回傳 actions（kind="config" 附 text 供寫入；kind="record" 由 manifest／local／state 流程自己寫，只列不寫）。"""
+    actions = []
+
+    def cfg(rel_path, text):
+        p = target / rel_path
+        if not p.exists():
+            act = "create"
+        elif norm_nl(read_text(p)).strip() == norm_nl(text).strip():
+            act = "unchanged"
+        else:
+            act = "modify"
+        actions.append({"kind": "config", "rel": rel_path, "action": act, "text": text})
+
+    # hooks：Claude Code 與 Codex（選用）
+    for rel_path, groups in ((".claude/settings.json", claude_hook_groups(python, python_args)),
+                             (".codex/hooks.json", codex_hook_groups(python, python_args))):
+        p = target / rel_path
+        cur = load_json(p, None) if p.exists() else None
+        if p.exists() and cur is None:
+            actions.append({"kind": "config", "rel": rel_path, "action": "skip(非有效 JSON)", "text": None})
+            continue
+        merged = merge_hooks(dict(cur or {}), groups)
+        cfg(rel_path, json.dumps(merged, ensure_ascii=False, indent=2) + "\n")
+    # .gitignore
+    gi = target / ".gitignore"
+    gi_txt = read_text(gi) if gi.exists() else ""
+    missing = [l for l in GITIGNORE_LINES[1:] if l not in norm_nl(gi_txt).splitlines()]
+    if missing:
+        nl = detect_newline(gi_txt) if gi_txt else "\n"
+        t = norm_nl(gi_txt)
+        if t and not t.endswith("\n"):
+            t += "\n"
+        tail = [l for l in t.splitlines() if l.strip()][-1:]
+        if tail and tail[0] in GITIGNORE_LINES:   # 檔尾就是我們的區段 → 接在後面，不重複標題
+            t += "\n".join(missing) + "\n"
+        else:
+            if t.strip():
+                t += "\n"
+            t += "\n".join([GITIGNORE_LINES[0]] + missing) + "\n"
+        actions.append({"kind": "config", "rel": ".gitignore", "action": "modify" if gi.exists() else "create",
+                        "text": t.replace("\n", nl) if nl != "\n" else t})
+    # 資料夾與佔位
+    for d in ("handoffs", "reviews", "fixes"):
+        keep = f".ai-review/{d}/.gitkeep"
+        if not (target / keep).exists():
+            actions.append({"kind": "config", "rel": keep, "action": "create", "text": ""})
+    # 紀錄檔（每次都會寫）
+    for rel_path in (".ai-review/kit-version.json", ".ai-review/local.json", ".ai-review/state.json"):
+        actions.append({"kind": "record", "rel": rel_path,
+                        "action": "modify" if (target / rel_path).exists() else "create"})
+    return actions
+
+
+def print_plan(actions, target, show_diff=False, config=None):
     print(f"目標專案：{target}")
     print("| 項目 | 動作 |")
     print("|---|---|")
     for a in actions:
         print(f"| {a['rel']} | {a['action']} |")
+    if config:
+        print("\n設定與紀錄檔（hook 會讓 Claude Code／Codex 開工時自動執行 kit.py，請確認後再安裝）：")
+        print("| 項目 | 動作 |")
+        print("|---|---|")
+        for a in config:
+            print(f"| {a['rel']} | {a['action']} |")
     if show_diff:
         for a in actions:
             if a["kind"] == "file" and a["action"] in ("update", "conflict", "keep-user", "update(forced)"):
@@ -495,6 +556,14 @@ def print_plan(actions, target, show_diff=False):
                 print("\n".join(diff[:200]))
                 if len(diff) > 200:
                     print(f"… 共 {len(diff)} 行，只顯示前 200 行")
+        for a in config or []:
+            if a["kind"] == "config" and a["action"] in ("create", "modify") and a["rel"].endswith(".json"):
+                p = target / a["rel"]
+                cur = norm_nl(read_text(p)).splitlines() if p.exists() else []
+                diff = list(difflib.unified_diff(cur, norm_nl(a["text"]).splitlines(),
+                                                 f"專案/{a['rel']}", f"安裝後/{a['rel']}", lineterm="", n=2))
+                print(f"\n--- 差異：{a['rel']}（{a['action']}）---")
+                print("\n".join(diff[:200]))
 
 
 # ---------------------------------------------------------------- 執行安裝／更新
@@ -552,12 +621,13 @@ def do_install_or_update(args, mode):
     warn_if_personal_path(python)
 
     actions = plan(src, target, manifest, take)
+    config = plan_config(target, python, python_args)
     conflicts = [a for a in actions if a["action"].startswith("conflict")]
     keeps = [a for a in actions if a["action"] == "keep-user"]
     print(f"套件來源：{src.root}（版本 {src.version}）")
     if manifest:
         print(f"專案目前：{manifest.get('kit_version')}（安裝於 {manifest.get('installed_at')}，上次更新 {manifest.get('updated_at')}）")
-    print_plan(actions, target, show_diff=preview)
+    print_plan(actions, target, show_diff=preview, config=config)
     if keeps:
         print("\n保留使用者版本（來源沒變、專案有改）：" + ", ".join(a["rel"] for a in keeps))
     if conflicts:
@@ -593,48 +663,14 @@ def do_install_or_update(args, mode):
             elif a["action"] == "unchanged":
                 blocks_rec[name] = a["new_hash"]
 
-    # hooks：Claude Code
-    sp = target / ".claude" / "settings.json"
-    cur_settings = load_json(sp, None) if sp.exists() else None
-    if sp.exists() and cur_settings is None:
-        print(f"⚠ {sp} 不是有效 JSON，略過 hook 接線（請手動處理）")
-    else:
-        merged = merge_hooks(dict(cur_settings or {}), claude_hook_groups(python, python_args))
-        new_txt = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
-        if not sp.exists() or norm_nl(read_text(sp)).strip() != new_txt.strip():
-            r.write(".claude/settings.json", text=new_txt)
-    # hooks：Codex（選用）
-    cp = target / ".codex" / "hooks.json"
-    cur_codex = load_json(cp, None) if cp.exists() else None
-    if cp.exists() and cur_codex is None:
-        print(f"⚠ {cp} 不是有效 JSON，略過 Codex hook（請手動處理）")
-    else:
-        merged = merge_hooks(dict(cur_codex or {}), codex_hook_groups(python, python_args))
-        new_txt = json.dumps(merged, ensure_ascii=False, indent=2) + "\n"
-        if not cp.exists() or norm_nl(read_text(cp)).strip() != new_txt.strip():
-            r.write(".codex/hooks.json", text=new_txt)
-    # .gitignore
-    gi = target / ".gitignore"
-    gi_txt = read_text(gi) if gi.exists() else ""
-    missing = [l for l in GITIGNORE_LINES[1:] if l not in norm_nl(gi_txt).splitlines()]
-    if missing:
-        nl = detect_newline(gi_txt) if gi_txt else "\n"
-        t = norm_nl(gi_txt)
-        if t and not t.endswith("\n"):
-            t += "\n"
-        tail = [l for l in t.splitlines() if l.strip()][-1:]
-        if tail and tail[0] in GITIGNORE_LINES:   # 檔尾就是我們的區段 → 接在後面，不重複標題
-            t += "\n".join(missing) + "\n"
-        else:
-            if t.strip():
-                t += "\n"
-            t += "\n".join([GITIGNORE_LINES[0]] + missing) + "\n"
-        r.write(".gitignore", text=t.replace("\n", nl) if nl != "\n" else t)
-    # 資料夾與佔位
-    for d in ("handoffs", "reviews", "fixes"):
-        keep = f".ai-review/{d}/.gitkeep"
-        if not (target / keep).exists():
-            r.write(keep, text="")
+    # hooks、.gitignore、佔位檔（內容已在 plan_config 算好，與預覽一致）
+    for a in config:
+        if a["kind"] != "config":
+            continue
+        if a["action"].startswith("skip"):
+            print(f"⚠ {target / a['rel']} 不是有效 JSON，略過 hook 接線（請手動處理）")
+        elif a["action"] in ("create", "modify"):
+            r.write(a["rel"], text=a["text"])
     # manifest
     new_manifest_obj.update({
         "kit_version": src.version, "updated_at": now_str(), "files": files_rec, "blocks": blocks_rec,

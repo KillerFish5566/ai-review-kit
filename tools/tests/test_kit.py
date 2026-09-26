@@ -369,6 +369,29 @@ def main():
     rc, out, err = kit("restore", "--target", str(p8), "--yes")
     check("T15 restore 安裝後 local.json 也移除", rc == 0 and not (p8 / ".ai-review/local.json").exists(), out[-300:])
 
+    # ---------------- T16 install --preview 要列出實裝會寫的每一個檔（含 hook、設定、佔位、紀錄檔）
+    p9 = new_git_project(root, "p9-preview-complete")
+    write(p9 / ".gitignore", "node_modules/\n")
+
+    def snapshot(d):
+        return {f.relative_to(d).as_posix(): f.read_bytes() for f in d.rglob("*")
+                if f.is_file() and ".git" not in f.relative_to(d).parts[:1]}
+
+    before = snapshot(p9)
+    rc, out, err = kit("install", "--target", str(p9), "--preview")
+    check("T16 preview 未寫入任何檔", rc == 0 and snapshot(p9) == before, err[-300:])
+    listed = set(re.findall(r"^\| (\S+) \| [^|]+\|\s*$", out, re.M)) - {"項目"}
+    kit("install", "--target", str(p9))
+    after = snapshot(p9)
+    touched = {p for p in after if p not in before or after[p] != before[p]}
+    touched = {p for p in touched if not p.startswith(".ai-review/.backup/")}   # 備份是安裝的副產品，不是變更對象
+    check("T16 實裝寫入的檔全部出現在預覽", touched <= listed, str(sorted(touched - listed)))
+    for key in (".claude/settings.json", ".codex/hooks.json", ".gitignore", ".ai-review/local.json",
+                ".ai-review/kit-version.json", ".ai-review/state.json", ".ai-review/reviews/.gitkeep"):
+        if key not in listed:
+            check(f"T16 預覽列出 {key}", False, out[-600:])
+    check("T16 預覽附 hook 內容差異", "差異：.claude/settings.json" in out, out[-600:])
+
     # ---------------- 總結
     fails = [r for r in RESULTS if not r[1]]
     print(f"\n共 {len(RESULTS)} 項，通過 {len(RESULTS) - len(fails)}，失敗 {len(fails)}")

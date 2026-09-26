@@ -65,7 +65,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 
 | 指令 | 用途 |
 |---|---|
-| `install --preview` | 只看會動哪些檔案與差異，不寫入 |
+| `install --preview` | 只看會動哪些檔案與差異（含 hook、設定檔、`.gitignore`、紀錄檔），不寫入 |
 | `update --source <資料夾或 zip> [--preview]` | 更新；三方比對（安裝時／目前／新來源），使用者改過的保留，兩邊都改的列為衝突不覆蓋，`--take-source <路徑>` 才採用來源 |
 | `status` | 套件版本、來源版本、使用者改過哪些檔、hooks／Skills／入口是否就位、目前流程狀態 |
 | `restore --yes` | 還原最近一次安裝／更新前的狀態（先列清單）；可逐次往前還原 |

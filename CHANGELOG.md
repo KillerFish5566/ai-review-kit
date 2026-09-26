@@ -3,6 +3,14 @@
 版本規則：patch＝修 bug 不改行為；minor＝加功能且舊專案資料相容；major＝專案資料需轉換或使用方式改變。
 每次發版：改 `VERSION`、在這裡加一段、`kit.py pack` 重打離線包。
 
+## 0.1.2 — 2026-09-26
+
+修正：`install／update --preview` 漏列設定與紀錄檔（第二台電腦 2026-09-21 回報）。
+
+- 預覽原本只列套件檔與入口區塊（20 項），實裝另外會寫 `.claude/settings.json`（SessionStart、Stop hook）、`.codex/hooks.json`、`.gitignore`、三個 `.gitkeep` 與 `kit-version.json`／`local.json`／`state.json`。現在另起一張「設定與紀錄檔」表全部列出，兩個 hook 設定檔附安裝前後差異。
+- 這些檔的內容改為在預覽前就算好，實裝照同一份內容寫入，預覽與實裝不會對不上。
+- 測試 78 → 81 項（新增 T16：預覽不寫檔、實裝寫入的每個檔都出現在預覽、hook 差異有顯示）。
+
 ## 0.1.1 — 2026-09-19
 
 修正：安裝後進版控的檔案會帶出本機路徑（含 Windows 使用者名稱）。
