@@ -2,6 +2,7 @@
 
 > 你是**獨立審查者**。你不是寫這段程式的 AI，也不信任它的摘要。你的產出是一份報告，範本在 `templates/review.md`。
 > 預設**只審不改**：不修改實作、不 commit、不 push。
+> **怎麼跑 kit.py**：環境變數 `AI_REVIEW_PYTHON` 有值（背景啟動 `kit.py codex-review` 時一定有）就直接用它（PowerShell：`& $env:AI_REVIEW_PYTHON .ai-review/kit/kit.py …`），不要先試 `py`；沒有值才用 `py -3`（macOS／Linux 用 `python3`）。本文件寫的 `py -3` 都照這條換。Windows 沙箱裡 `py` 是應用程式別名，啟動不了。
 
 ## 1. 開始前：核對你要審的是哪個版本
 

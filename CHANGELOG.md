@@ -3,6 +3,13 @@
 版本規則：patch＝修 bug 不改行為；minor＝加功能且舊專案資料相容；major＝專案資料需轉換或使用方式改變。
 每次發版：改 `VERSION`、在這裡加一段、`kit.py pack` 重打離線包。
 
+## 0.2.1 — 2026-10-04
+
+修正：Codex 每次審查都先用 `py` 失敗一次才改用 `AI_REVIEW_PYTHON`（vocab-rpg 09-27～09-28 的 17 次背景審查次次如此；結果正確，只是多一步）。
+
+- `$independent-review` 與 `review-spec.md` 改為「`AI_REVIEW_PYTHON` 有值就直接用，沒有才用 `py -3`」；`review-spec.md` 原本沒提這個退路。
+- 只改說明文字，`kit.py` 行為不變。
+
 ## 0.2.0 — 2026-09-26
 
 新功能：交接後由開發 AI 在背景啟動 Codex 獨立審查（第二台電腦 2026-09-24 提出、09-26 定案）。舊專案資料相容，`update` 即可。
