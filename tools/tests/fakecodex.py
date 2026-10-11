@@ -3,7 +3,8 @@
 """測試用的假 codex：記下收到的參數與環境，依 FAKE_CODEX_MODE 決定要不要寫審查報告。
 review（預設）＝寫一份 codex 審查 no-blocking-found；noreport＝什麼都不寫、exit 1；
 dirty＝照常寫報告，另外在專案根目錄留一個字面名稱的 %SystemDrive% 資料夾（模擬 2026-10-11 沙箱弄髒工作區；
-FAKE_CODEX_JUNK 可換資料夾名）。
+FAKE_CODEX_JUNK 可換資料夾名）；ignored＝照常寫報告，另外寫進 FAKE_CODEX_IGNORED（預設 data/review-tmp-x，測試把 data/ 設成排除）。
+`login --help`／`login status`：FAKE_CODEX_LOGIN=out 未登入、nostatus 沒有 status 子指令；其他 login 形式印 FAKE-LOGIN-FLOW-STARTED（測試確認 doctor 不會走到）。
 `mcp get <名稱> --json`：FAKE_CODEX_MCP=none 時回「沒有這個伺服器」（exit 1），否則回一份假的 node_repl 設定。"""
 import json
 import os
@@ -11,6 +12,22 @@ import sys
 from pathlib import Path
 
 argv = sys.argv[1:]
+if argv[:2] == ["login", "--help"]:
+    if os.environ.get("FAKE_CODEX_LOGIN") == "nostatus":      # 模擬沒有 status 子指令的舊版
+        print("Manage login\n\nUsage: codex login [OPTIONS]\n\nOptions:\n  -h, --help  Print help")
+    else:
+        print("Manage login\n\nUsage: codex login [OPTIONS] [COMMAND]\n\nCommands:\n  status  Show login status\n"
+              "  help    Print this message\n\nOptions:\n  -h, --help  Print help")
+    sys.exit(0)
+if argv[:2] == ["login", "status"]:
+    if os.environ.get("FAKE_CODEX_LOGIN") == "out":
+        print("Not logged in")
+        sys.exit(1)
+    print("Logged in using ChatGPT (fake-user@example.com)")
+    sys.exit(0)
+if argv[:1] == ["login"]:          # 其他 login 形式＝會觸發登入流程：測試要確認 doctor 從不走到這裡
+    print("FAKE-LOGIN-FLOW-STARTED")
+    sys.exit(9)
 if argv[:2] == ["mcp", "get"]:
     if os.environ.get("FAKE_CODEX_MCP") == "none" or argv[2] != "node_repl":
         print(f"Error: No MCP server named '{argv[2]}' found.", file=sys.stderr)
@@ -32,6 +49,10 @@ print("fake codex running")
 mode = os.environ.get("FAKE_CODEX_MODE")
 if mode == "noreport":
     sys.exit(1)
+if mode == "ignored":      # 寫進 .gitignore 排除的位置（模擬審查把暫存放進個人資料夾 data/）
+    junk = target / os.environ.get("FAKE_CODEX_IGNORED", "data/review-tmp-x")
+    junk.mkdir(parents=True, exist_ok=True)
+    (junk / "t.txt").write_text("tmp", encoding="utf-8")
 if mode == "dirty":
     junk = target / os.environ.get("FAKE_CODEX_JUNK", "%SystemDrive%") / "ProgramData" / "Microsoft" / "Windows" / "Caches"
     junk.mkdir(parents=True, exist_ok=True)

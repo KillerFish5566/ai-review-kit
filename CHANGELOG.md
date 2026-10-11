@@ -3,6 +3,29 @@
 版本規則：patch＝修 bug 不改行為；minor＝加功能且舊專案資料相容；major＝專案資料需轉換或使用方式改變。
 每次發版：改 `VERSION`、在這裡加一段、`kit.py pack` 重打離線包。
 
+## 0.4.0 — 2026-10-11
+
+新功能：`.gitignore` 機密清單檢查（10-11 推送前連續三個倉庫的推送檢查表都卡在「.gitignore 沒排除金鑰、憑證、對話紀錄、記憶」，每次人工補）。只提醒、不改使用者專案的 `.gitignore`；`install` 也不塞清單（那是使用者專案的版控設定，超出審查套件範圍）。舊專案資料相容。
+
+- `kit.py ignore-check [--json]`：唯讀。內建 15 條標準清單（以套件自己的 `.gitignore` 為準：`.env`、`.env.*`、`*.local.*`、`credentials*`、`secrets.*`、`.claude/settings.local.json`、`*.pem`、`*.key`、`*.pfx`、`*.p12`、`id_rsa*`、`id_ed25519*`、`.claude/projects/`、`*.jsonl`、`memory/`），每條附白話說明。
+  - 判斷交給 git：每條造一個代表性的假路徑跑 `git check-ignore --no-index`（含否定規則 `!…`）；已追蹤的符合檔用 `git ls-files --cached --ignored --exclude=<條目>`，**只列路徑、不讀不印內容**。
+  - 只靠 `.git/info/exclude` 或全域排除設定擋住的，列「只在這台電腦排除」，也算要補（別人 clone 下來不受保護）。
+  - 清單要求的是 `.claude/projects/`，不是整個 `.claude/`：套件裝的 `.claude/skills/`、`.claude/settings.json` 要進版控。
+  - 本專案是正常資料的條目（例如題庫 `*.jsonl`）：在 `config.md` 第 6 節的 ```` ```ignore-ok ```` 區塊記「條目 | 日期 | 理由」，之後改列「已決定不排除」，已追蹤清單也不再列它。
+  - 缺漏 exit 0（提醒，不是關卡；不影響 `gate` 與狀態）；資料夾不存在、git 執行失敗才非 0；不是 git 專案印說明、exit 0。不寫 state、不改任何檔、不影響指紋。
+- `/safety-setup`：盤點第 1 步改跑 `ignore-check`；缺的條目與已追蹤的符合檔逐條寫進 `config.md` 第 6 節（`--refresh` 不重複加）；回報時加一句白話提醒，並把「要不要補 `.gitignore`」列進「你需要決定的事」。明寫不自動改 `.gitignore`、不自動 `git rm --cached`。
+- `templates/config.md`：第 6 節加 ```` ```ignore-ok ```` 區塊與說明。已安裝專案的 `config.md` 是專案專屬，`update` 不動它；`/safety-setup --refresh` 會照範本補上區塊。
+- README、`workflow.md`、`security-checklist.md`、`daily-usage.md` 同步。
+- 「已初始化」改嚴：`config.md` 存在**且** meta 區塊有填（不是範本的 `{{…}}`）**且**第 4 節至少一條檢查命令。之前只要有 config.md 就算，秘書專案因此在還沒做 `/safety-setup` 時就送審（T-0048 盤點 G7）。不符時 `state`／`status`／開場 hook 印白話原因（例：「config.md 只有部分內容…，請先執行 /safety-setup」），state.json 多一個 `init_reason`。`/review-ready` 前置改成看 `state --json` 的 `initialized`，沒完成就停下請使用者先跑 `/safety-setup`；`/safety-setup` 寫明第 4 節至少一條。vocab-rpg、秘書現有 config 判斷結果仍是已初始化（唯讀驗證）。
+- 審後比對補盲點（G5）：`codex-review` 審前審後另外比對「專案根目錄與第一層資料夾清單（**包括 .gitignore 排除的**）」，審查期間多出來、又沒被 `workspace_changes`／字面環境變數資料夾涵蓋的，寫進 `.done` 的 `new_ignored_entries` 並印警告。`.ai-review/.cache/` 底下是預期變動，不列。只警告、不算指紋、不刪任何檔。（例：審查把暫存寫進被排除的個人資料夾 `data/review-…`，以前看不到。）
+- 秘密掃描範例加 `--redact`（G9）：`safety-setup` 與 `security-checklist.md` 改成 `gitleaks detect --no-banner --redact`，掃到金鑰時原文不會進 `.cache/checks-*.json` 與會 commit 的交接報告。已安裝專案的 config.md 第 4 節不會被自動改，要自己補。
+- `kit.py doctor [--json]`（G10）：唯讀列出送審前還缺什麼——git、Codex 在不在 PATH、Codex 登入（先讀 `codex login --help` 確認有 `status` 子指令才跑 `codex login status`，只看 exit code、不印輸出（可能含帳號）、不觸發登入；沒有就請使用者自己確認）、node_repl 有沒有設定（沿用 `codex mcp get node_repl --json`）、gitleaks／pip-audit（PATH 與專案 `.venv`）、送審會用哪個實體 Python；已安裝專案另列初始化狀態與第 6 節未解幾項。缺的只提示，exit 0。install 結尾改成「先跑 doctor 看還缺什麼，再開 Claude Code 跑 /safety-setup」。
+- 第 6 節「未驗證事項」加「狀態」欄（G11）：範本表格多一欄（`未解`／`已解 YYYY-MM-DD`），已解不刪列。`/safety-setup --refresh` 會補欄、逐列標狀態、把 meta 的 `kit_version` 更新成目前版本。kit 讀第 6 節（`doctor` 用）相容舊格式：沒有狀態欄的舊表全部算「未標狀態」，不猜已解。
+- `state --no-write`（配 `--json`）：只推導、印 JSON，**不寫任何檔**（state.json、.cache 都不寫），給工作根目錄的轉接 hook 讀（使用者 Q158 選了使用者層轉接 hook）。舊版 kit 沒有這個旗標，argparse 回 exit 2，呼叫端可當「舊版、略過」。
+- `state.json` 不進版控（使用者 Q159 甲）：install／update 的 `.gitignore` 區段多一行 `.ai-review/state.json`（照既有逐行去重，手動加過的不重複）。專案裡 `state.json` 仍被 git 追蹤時，install／update 結尾提醒自己跑 `git rm --cached .ai-review/state.json` 再存一個版本；**kit 不自己動版控**。`gate` 與 CI 範例都是現場推導狀態，不依賴提交的 state.json。
+- 文件誠實化（G13、G2）：README「限制」與 `daily-usage.md` 寫明「開場狀態與收工提醒只有在專案資料夾直接開 Claude Code 才會跑」「審查紀錄跟著 git 分支走，換分支看到的是那個分支的狀態」。`workflow.md` 把 state.json 標成本機推導、不提交，常用指令加 `doctor`、`ignore-check`、`state --no-write`。
+- 測試 106 → 161 項：T21 ignore-check 18 項（全缺、全有、部分缺、否定規則、只在本機排除、已追蹤檔只列路徑不印內容、標記不排除後不再列、唯讀、非 git、`--json` 欄位、失敗才非 0）；T22 已初始化判斷 6 項；T23 排除位置多出東西 4 項；T24 `state --no-write` 5 項（含 .ai-review 每個檔位元組不變、不認得旗標 exit 2）；T25 第 6 節新舊格式 4 項；T26 doctor 12 項（假 codex 已登入／未登入／沒有 status 子指令／沒 node_repl、假 PATH、不印帳號、不走登入流程、唯讀）；T27 state.json 不進版控 6 項（新裝有該行、已有不重複、舊專案補行、仍被追蹤只提醒、index 位元組不變）。
+
 ## 0.3.0 — 2026-10-11
 
 修正：Codex 審查時沙箱裡的命令拿不到 `SystemDrive`、`AI_REVIEW_PYTHON` 等環境變數（2026-10-11 vocab-rpg 與秘書兩個專案都發生）。Windows 元件因此把快取寫到專案根目錄一個字面名稱的 `%SystemDrive%\` 資料夾（約 1 MB），指紋漂移、複查判 invalid（vocab-rpg R-20261011-1136）；`py` 與 gitleaks 也起不來。舊專案資料相容，`update` 即可。

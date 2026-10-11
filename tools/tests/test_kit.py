@@ -538,6 +538,326 @@ def main():
           and "fingerprint_drift" not in done3 and "%Windir%" in out and done3.get("verdict") == "no-blocking-found",
           out[-600:] + json.dumps(done3, ensure_ascii=False)[:600])
 
+    # ---------------- T21 ignore-check：.gitignore 機密清單檢查（唯讀、只提醒）（未發版新增）
+    # 隔離本機的全域 git 排除設定（~/.config/git/ignore、core.excludesFile），結果才不受跑測試的電腦影響
+    xdg = root / "t21-xdg"
+    xdg.mkdir()
+    gcfg = root / "t21-gitconfig"
+    write(gcfg, "")
+    ienv = dict(ENV, XDG_CONFIG_HOME=str(xdg), GIT_CONFIG_GLOBAL=str(gcfg))
+    std = [".env", ".env.*", "*.local.*", "credentials*", "secrets.*", ".claude/settings.local.json", "*.pem", "*.key",
+           "*.pfx", "*.p12", "id_rsa*", "id_ed25519*", ".claude/projects/", "*.jsonl", "memory/"]
+
+    def ic(target, *extra):
+        return sh([PY, str(KIT_PY), "ignore-check", "--target", str(target), *extra], env=ienv)
+
+    def icj(target):
+        rc, out, err = ic(target, "--json")
+        try:
+            return rc, json.loads(out), err
+        except Exception:
+            return rc, {}, out[-400:] + err[-400:]
+
+    def status_of(info):
+        return {r["line"]: r["status"] for r in info.get("rules", [])}
+
+    def tree_bytes(d):
+        return {f.relative_to(d).as_posix(): f.read_bytes() for f in d.rglob("*") if f.is_file()}
+
+    # 全缺
+    p11 = new_git_project(root, "p11-ignore-none")
+    rc, info, err = icj(p11)
+    check("T21 全缺：exit 0、15 條都列為缺、建議行＝標準清單",
+          rc == 0 and info.get("git") is True and info.get("missing") == std and info.get("suggested_lines") == std
+          and set(status_of(info).values()) == {"missing"}, err + json.dumps(info, ensure_ascii=False)[:400])
+    rc, out, err = ic(p11)
+    check("T21 全缺：預設白話輸出、缺漏不算錯誤（exit 0）",
+          rc == 0 and "缺 15 條" in out and "要不要補由你決定" in out and "唯讀" in out, out[-400:] + err[-200:])
+    # 全有
+    p12 = new_git_project(root, "p12-ignore-all")
+    write(p12 / ".gitignore", "\n".join(std) + "\n")
+    rc, info, err = icj(p12)
+    check("T21 全有：沒有缺漏、15 條都是已排除",
+          rc == 0 and info.get("missing") == [] and set(status_of(info).values()) == {"covered"}
+          and info.get("tracked") == [], err + json.dumps(info, ensure_ascii=False)[:400])
+    rc, out, err = ic(p12)
+    check("T21 全有：白話輸出說都已排除", rc == 0 and "都已排除" in out and "缺 " not in out, out[-300:])
+    # 部分缺：含否定規則與只在本機排除（.git/info/exclude）
+    p13 = new_git_project(root, "p13-ignore-partial")
+    write(p13 / ".gitignore", ".env\n*.pem\n*.jsonl\n!session.jsonl\n")
+    write(p13 / ".git/info/exclude", "*.key\n")
+    rc, info, err = icj(p13)
+    st13 = status_of(info)
+    check("T21 部分缺：已寫的算已排除、其餘列缺",
+          rc == 0 and st13.get(".env") == "covered" and st13.get("*.pem") == "covered"
+          and st13.get(".env.*") == "missing" and st13.get("memory/") == "missing", json.dumps(st13, ensure_ascii=False))
+    check("T21 否定規則（!session.jsonl）讓 *.jsonl 仍算缺（判斷交給 git）", st13.get("*.jsonl") == "missing",
+          json.dumps(st13, ensure_ascii=False))
+    check("T21 只在 .git/info/exclude 排除 → 只在本機排除，也列進要補的行",
+          st13.get("*.key") == "local-only" and "*.key" in info.get("missing", []) and "*.key" in info.get("suggested_lines", []),
+          json.dumps(st13, ensure_ascii=False))
+    # 已追蹤的符合檔：只列路徑、不印內容；標記「已決定不排除」後不再列
+    p14 = new_git_project(root, "p14-ignore-tracked")
+    write(p14 / ".env", "SECRET_TOKEN=should-not-print-xyz\n")
+    write(p14 / "data/words.jsonl", '{"w": "apple"}\n')
+    git("add", "-A", cwd=p14)
+    git("commit", "-q", "-m", "oops", cwd=p14)
+    write(p14 / ".gitignore", "\n".join(x for x in std if x != "*.jsonl") + "\n")
+    (p14 / ".ai-review").mkdir()
+    shutil.copy(KIT_ROOT / "templates/config.md", p14 / ".ai-review/config.md")
+    rc, info, err = icj(p14)
+    tracked = {t["line"]: t["paths"] for t in info.get("tracked", [])}
+    check("T21 已追蹤的符合檔被列出（.env、data/words.jsonl）",
+          rc == 0 and tracked.get(".env") == [".env"] and tracked.get("*.jsonl") == ["data/words.jsonl"],
+          json.dumps(info.get("tracked"), ensure_ascii=False))
+    check("T21 範本的 ignore-ok 區塊只有註解範例，不算標記（*.jsonl 仍缺）",
+          info.get("missing") == ["*.jsonl"] and info.get("accepted") == [], json.dumps(info.get("missing"), ensure_ascii=False))
+    rc, out, err = ic(p14)
+    check("T21 白話輸出列已追蹤檔路徑、絕不印檔案內容",
+          rc == 0 and "data/words.jsonl" in out and "已經被 git 追蹤" in out and "should-not-print-xyz" not in out,
+          out[-500:])
+    rc, outj, err = ic(p14, "--json")
+    check("T21 --json 也不含檔案內容", "should-not-print-xyz" not in outj)
+    cfg = read(p14 / ".ai-review/config.md")
+    write(p14 / ".ai-review/config.md", cfg.replace("```ignore-ok\n", "```ignore-ok\n*.jsonl | 2026-10-11 | 題庫資料\n", 1))
+    before = tree_bytes(p14)
+    rc, info, err = icj(p14)
+    tracked = {t["line"]: t["paths"] for t in info.get("tracked", [])}
+    acc = [r for r in info.get("rules", []) if r["line"] == "*.jsonl"]
+    check("T21 標記「已決定不排除」後：不算缺、已追蹤清單也不再列，其他條照列",
+          rc == 0 and info.get("missing") == [] and info.get("accepted") == ["*.jsonl"] and "*.jsonl" not in tracked
+          and tracked.get(".env") == [".env"] and acc and acc[0]["status"] == "accepted"
+          and acc[0].get("accepted", {}).get("reason") == "題庫資料", json.dumps(info, ensure_ascii=False)[:600])
+    rc, out, err = ic(p14)
+    check("T21 白話輸出顯示已決定不排除與理由", "已決定不排除" in out and "題庫資料" in out, out[-500:])
+    check("T21 唯讀：跑完專案（含 .git）每個檔位元組都沒變", tree_bytes(p14) == before)
+    # 非 git、--json 格式、失敗才非 0
+    p15 = root / "p15-ignore-nogit"
+    p15.mkdir()
+    write(p15 / "main.py", "print(1)\n")
+    rc, out, err = ic(p15)
+    check("T21 非 git 目錄：印說明、exit 0", rc == 0 and "不是 git 專案" in out, out + err)
+    rc, info, err = icj(p15)
+    check("T21 非 git 的 --json：git=false、沒有規則", rc == 0 and info.get("git") is False and info.get("rules") == [], err)
+    rc, info, err = icj(p12)
+    keys_ok = all(k in info for k in ("target", "git", "rules", "missing", "accepted", "tracked", "suggested_lines", "note"))
+    rule_ok = all(set(r) >= {"line", "probe", "why", "status", "matched_by"} and r["why"] for r in info.get("rules", []))
+    check("T21 --json 欄位齊全、每條都有白話說明", keys_ok and rule_ok and len(info.get("rules", [])) == 15, json.dumps(info, ensure_ascii=False)[:400])
+    rc, out, err = ic(root / "no-such-dir-t21")
+    check("T21 指令本身失敗（資料夾不存在）才非 0", rc != 0 and "找不到資料夾" in err, out + err)
+
+    # ---------------- T22 「已初始化」要 meta 有填＋第 4 節至少一條命令（G7，未發版）
+    p16 = new_git_project(root, "p16-init")
+    kit("install", "--target", str(p16))
+    p16kit = p16 / ".ai-review/kit/kit.py"
+
+    def st_nowrite(proj, script):
+        rc, out, err = kit("state", "--json", "--no-write", cwd=proj, script=script)
+        try:
+            return json.loads(out)
+        except Exception:
+            return {"_raw": out[-300:] + err[-300:]}
+
+    s = st_nowrite(p16, p16kit)
+    check("T22 沒有 config.md → 未初始化、原因說沒有 config", s.get("initialized") is False and "沒有 .ai-review/config.md" in (s.get("init_reason") or ""), json.dumps(s, ensure_ascii=False)[:300])
+    tmpl = read(KIT_ROOT / "templates/config.md")
+    write(p16 / ".ai-review/config.md", tmpl)
+    s = st_nowrite(p16, p16kit)
+    check("T22 只有範本（meta 是 {{…}}、checks 空）→ 未初始化、白話說只有部分內容",
+          s.get("initialized") is False and "只有部分內容" in (s.get("init_reason") or ""), json.dumps(s, ensure_ascii=False)[:300])
+    meta_filled = tmpl.replace("{{KIT_VERSION}}", "0.3.0").replace("{{DATE}}", "2026-10-11")
+    write(p16 / ".ai-review/config.md", meta_filled)
+    s = st_nowrite(p16, p16kit)
+    check("T22 meta 有填但第 4 節沒命令 → 未初始化、原因點名第 4 節",
+          s.get("initialized") is False and "第 4 節" in (s.get("init_reason") or ""), json.dumps(s, ensure_ascii=False)[:300])
+    write(p16 / ".ai-review/config.md", tmpl.replace("```checks\nname | command | required\n```",
+                                                     "```checks\nname | command | required\nok | echo ok | yes\n```"))
+    s = st_nowrite(p16, p16kit)
+    check("T22 有命令但 meta 還是範本 → 未初始化、原因點名 meta",
+          s.get("initialized") is False and "meta" in (s.get("init_reason") or ""), json.dumps(s, ensure_ascii=False)[:300])
+    write(p16 / ".ai-review/config.md", meta_filled.replace("```checks\nname | command | required\n```",
+                                                            "```checks\nname | command | required\nok | echo ok | yes\n```"))
+    s = st_nowrite(p16, p16kit)
+    check("T22 meta 有填＋至少一條命令 → 已初始化", s.get("initialized") is True and s.get("init_reason") == "已完成",
+          json.dumps(s, ensure_ascii=False)[:300])
+    write(p16 / ".ai-review/config.md", tmpl)
+    rc, out, err = kit("hook", "session-start", cwd=p16, script=p16kit, input_text=b"{}")
+    check("T22 開場 hook 顯示白話原因", rc == 0 and "初始化：未完成 → config.md 只有部分內容" in out, out[-400:])
+
+    # ---------------- T23 審後比對看得到 .gitignore 排除位置多出的東西（G5，未發版）
+    write(p10 / ".gitignore", read(p10 / ".gitignore") + "data/\n")
+    (p10 / "data").mkdir(exist_ok=True)
+    write(p10 / "data/user.db", "x")
+    rc, out, err = kit("snapshot", "--json", cwd=p10, script=p10kit)
+    snap4 = json.loads(out) if rc == 0 else {}
+    H4 = snap4.get("id", "H-missing")
+    write(p10 / f".ai-review/handoffs/{H4}.md", front(H4, "handoff", target=snap4.get("target"), snapshot_ref=snap4.get("snapshot_ref"),
+                                                        head=snap4.get("head"), base=snap4.get("base"), recheck_of="", scope="t23"))
+    rc, out, err = sh([PY, str(p10kit), "codex-review", "--codex", str(fake)], cwd=p10,
+                      env=dict(ENV, FAKE_CODEX_MODE="ignored", FAKE_CODEX_IGNORED="data/review-H1141-c4YHfC"))
+    done4p = p10 / f".ai-review/.cache/codex-{H4}.done"
+    done4 = json.loads(read(done4p)) if done4p.exists() else {}
+    check("T23 審查寫進被排除的 data/ → .done 的 new_ignored_entries 列出、輸出有警告",
+          done4.get("new_ignored_entries") == ["data/review-H1141-c4YHfC/"] and "data/review-H1141-c4YHfC/" in out and "不會自動刪" in out,
+          out[-600:] + json.dumps(done4, ensure_ascii=False)[:500])
+    check("T23 只警告：不算指紋漂移、不算工作區變動、結論照常、檔案沒被刪",
+          "fingerprint_drift" not in done4 and "workspace_changes" not in done4 and done4.get("verdict") == "no-blocking-found"
+          and (p10 / "data/review-H1141-c4YHfC/t.txt").is_file(), json.dumps(done4, ensure_ascii=False)[:500])
+    check("T23 .ai-review/.cache 底下的預期變動（紀錄、tmp、fake-record）不警告",
+          not any(e.startswith(".ai-review/") for e in done4.get("new_ignored_entries", [])), json.dumps(done4, ensure_ascii=False)[:500])
+    rc, out, err = kit("snapshot", "--json", cwd=p10, script=p10kit)
+    snap5 = json.loads(out) if rc == 0 else {}
+    H5 = snap5.get("id", "H-missing")
+    write(p10 / f".ai-review/handoffs/{H5}.md", front(H5, "handoff", target=snap5.get("target"), snapshot_ref=snap5.get("snapshot_ref"),
+                                                        head=snap5.get("head"), base=snap5.get("base"), recheck_of="", scope="t23b"))
+    rc, out, err = kit("codex-review", "--codex", str(fake), "--again", cwd=p10, script=p10kit)
+    done5p = p10 / f".ai-review/.cache/codex-{H5}.done"
+    done5 = json.loads(read(done5p)) if done5p.exists() else {}
+    check("T23 乾淨的審查（沒多東西）→ 沒有 new_ignored_entries 與警告",
+          rc == 0 and "new_ignored_entries" not in done5 and "warnings" not in done5, out[-400:] + json.dumps(done5, ensure_ascii=False)[:400])
+
+    # ---------------- T24 state --no-write：只推導、不寫任何檔（給工作根目錄的轉接 hook 用，未發版）
+    write(p10 / "app.py", read(p10 / "app.py") + "# t24 change\n")       # 讓「會寫」的 state 結果一定和現存 state.json 不同
+    ai_before = tree_bytes(p10 / ".ai-review")
+    rc, out, err = kit("state", "--json", "--no-write", cwd=p10, script=p10kit)
+    sj = json.loads(out) if rc == 0 else {}
+    check("T24 --no-write --json：.ai-review 底下每個檔位元組都沒變（含 state.json、.cache）",
+          rc == 0 and tree_bytes(p10 / ".ai-review") == ai_before, err[-300:])
+    check("T24 --no-write 的 JSON 欄位齊全（status、白話標籤、initialized、init_reason、fresh、handoff、review、open_items）",
+          all(k in sj for k in ("status", "status_label", "initialized", "init_reason", "fresh", "handoff", "review", "open_items"))
+          and sj.get("status") == "not-ready" and sj.get("fresh") is False and (sj.get("handoff") or {}).get("id") == H5
+          and sj.get("status_label") == "尚未準備", json.dumps(sj, ensure_ascii=False)[:500])
+    rc, out, err = kit("state", "--no-write", cwd=p10, script=p10kit)
+    check("T24 --no-write 不加 --json 印白話狀態、也不寫檔", rc == 0 and "狀態：尚未準備" in out and tree_bytes(p10 / ".ai-review") == ai_before, out[-300:])
+    rc, out, err = kit("state", "--json", cwd=p10, script=p10kit)
+    check("T24 對照：不加 --no-write 會寫 state.json", rc == 0 and read(p10 / ".ai-review/state.json") != ai_before[
+        "state.json"].decode("utf-8-sig") and json.loads(read(p10 / ".ai-review/state.json"))["status"] == "not-ready")
+    rc, out, err = kit("state", "--json", "--definitely-unknown-flag", cwd=p10, script=p10kit)
+    check("T24 不認得的旗標 → argparse exit 2（舊版 kit 遇到 --no-write 就是這樣，轉接 hook 拿來判斷舊版）", rc == 2, out + err)
+
+    # ---------------- T25 config.md 第 6 節狀態欄解析（新舊格式相容）（G11，未發版）
+    p17 = new_git_project(root, "p17-unverified")
+    kit("install", "--target", str(p17))
+    p17kit = p17 / ".ai-review/kit/kit.py"
+
+    def unverified(proj, script):
+        rc, out, err = kit("doctor", "--json", "--codex", str(root / "no-such-codex.exe"), cwd=proj, script=script)
+        try:
+            return rc, (json.loads(out).get("project") or {}).get("unverified"), out
+        except Exception:
+            return rc, None, out[-300:] + err[-300:]
+
+    write(p17 / ".ai-review/config.md", tmpl)
+    rc, u, raw = unverified(p17, p17kit)
+    check("T25 範本：有狀態欄、0 列（ignore-ok 區塊不被當成表格列）", rc == 0 and u == {"total": 0, "open": 0, "resolved": 0, "no_status": 0, "has_status_column": True}, str(u) + raw[-200:])
+    new_fmt = tmpl.replace("| 日期 | 事項 | 為什麼還沒驗證 | 誰決定可接受 | 狀態 |\n|---|---|---|---|---|\n",
+                           "| 日期 | 事項 | 為什麼還沒驗證 | 誰決定可接受 | 狀態 |\n|---|---|---|---|---|\n"
+                           "| 2026-10-01 | 未裝 gitleaks | 沒裝 | 使用者 | 已解 2026-10-05 |\n"
+                           "| 2026-10-02 | 沒有 CI | 沒設 | 使用者 | 未解 |\n"
+                           "| 2026-10-03 | 依賴掃描 | 沒網路 | 使用者 | |\n")
+    write(p17 / ".ai-review/config.md", new_fmt)
+    rc, u, raw = unverified(p17, p17kit)
+    check("T25 新格式：已解 1、未解 2（空白狀態算未解）", u and u["has_status_column"] and u["total"] == 3 and u["resolved"] == 1 and u["open"] == 2,
+          str(u) + raw[-200:])
+    old_fmt = tmpl.replace("| 日期 | 事項 | 為什麼還沒驗證 | 誰決定可接受 | 狀態 |\n|---|---|---|---|---|\n",
+                           "| 日期 | 事項 | 為什麼還沒驗證 | 誰決定可接受 |\n|---|---|---|---|\n"
+                           "| 2026-09-18 | 未裝 gitleaks（已解） | 沒裝 | 使用者 |\n| 2026-09-19 | 沒有 CI | 沒設 | 使用者 |\n")
+    write(p17 / ".ai-review/config.md", old_fmt)
+    rc, u, raw = unverified(p17, p17kit)
+    check("T25 舊格式（沒有狀態欄）：相容、全部算未標狀態，不猜已解", u and not u["has_status_column"] and u["total"] == 2
+          and u["no_status"] == 2 and u["resolved"] == 0, str(u) + raw[-200:])
+    rc, out, err = kit("doctor", "--codex", str(root / "no-such-codex.exe"), cwd=p17, script=p17kit)
+    check("T25 doctor 白話輸出提示舊格式沒有狀態欄", rc == 0 and "舊格式沒有「狀態」欄" in out, out[-400:])
+
+    # ---------------- T26 doctor：裝完還缺什麼（唯讀、只提醒、不觸發登入）（G10，未發版）
+    rc, out, err = kit("install", "--target", str(new_git_project(root, "p18-install-msg")))
+    check("T26 install 結尾提示先跑 doctor 再 /safety-setup", rc == 0 and "doctor" in out and "/safety-setup" in out, out[-300:])
+    write(p17 / ".ai-review/config.md", new_fmt.replace("```checks\nname | command | required\n```",
+                                                        "```checks\nname | command | required\nok | echo ok | yes\n```")
+          .replace("{{KIT_VERSION}}", "0.3.0").replace("{{DATE}}", "2026-10-11"))
+    p17_before = tree_bytes(p17)
+
+    def doc_json(*extra, env=None):
+        rc, out, err = sh([PY, str(p17kit), "doctor", "--json", *extra], cwd=p17, env=env or ENV)
+        try:
+            return rc, json.loads(out), out + err
+        except Exception:
+            return rc, {}, out[-400:] + err[-400:]
+
+    def item(info, key):
+        return next((i for i in info.get("items", []) if i["key"] == key), {})
+
+    rc, d, raw = doc_json("--codex", str(fake))
+    check("T26 假 codex：在 PATH、已登入、node_repl 已設定、exit 0",
+          rc == 0 and item(d, "codex")["ok"] is True and item(d, "codex_login")["ok"] is True and item(d, "node_repl")["ok"] is True,
+          json.dumps(d, ensure_ascii=False)[:600])
+    check("T26 不印 login status 的原文（可能含帳號）、從不走到登入流程",
+          "fake-user@example.com" not in raw and "FAKE-LOGIN-FLOW" not in raw, raw[-400:])
+    check("T26 專案段：已初始化、第 6 節未解 2 已解 1", (d.get("project") or {}).get("initialized") is True
+          and ((d.get("project") or {}).get("unverified") or {}).get("open") == 2, json.dumps(d.get("project"), ensure_ascii=False))
+    rc, d, raw = doc_json("--codex", str(fake), env=dict(ENV, FAKE_CODEX_LOGIN="out"))
+    check("T26 未登入 → 列 ✗ 並提示 codex login，仍 exit 0", rc == 0 and item(d, "codex_login")["ok"] is False and "codex login" in item(d, "codex_login")["detail"], raw[-400:])
+    rc, d, raw = doc_json("--codex", str(fake), env=dict(ENV, FAKE_CODEX_LOGIN="nostatus"))
+    check("T26 codex 沒有 login status 子指令 → 不猜指令、請自己確認", rc == 0 and item(d, "codex_login")["ok"] is None
+          and "請自己確認已登入" in item(d, "codex_login")["detail"] and "FAKE-LOGIN-FLOW" not in raw, raw[-400:])
+    rc, d, raw = doc_json("--codex", str(fake), env=dict(ENV, FAKE_CODEX_MCP="none"))
+    check("T26 沒設定 node_repl → 標 ？（正常，不算缺）", rc == 0 and item(d, "node_repl")["ok"] is None, raw[-400:])
+    # 假 PATH：只有一支假 gitleaks；pip-audit 放在專案 .venv
+    fakebin = root / "t26-bin"
+    fakebin.mkdir()
+    if os.name == "nt":
+        write(fakebin / "gitleaks.cmd", "@echo off\r\n")
+        write(p17 / ".venv/Scripts/pip-audit.cmd", "@echo off\r\n")
+    else:
+        for f in (fakebin / "gitleaks", p17 / ".venv/bin/pip-audit"):
+            write(f, "#!/bin/sh\n")
+            f.chmod(0o755)
+    p17_before = tree_bytes(p17)
+    rc, d, raw = doc_json(env=dict(ENV, PATH=str(fakebin)))
+    check("T26 假 PATH：找不到 codex 列 ✗、gitleaks 找到、pip-audit 從專案 .venv 找到，exit 0",
+          rc == 0 and item(d, "codex")["ok"] is False and item(d, "codex_login")["ok"] is None
+          and item(d, "gitleaks")["ok"] is True and item(d, "pip_audit")["ok"] is True, json.dumps(d, ensure_ascii=False)[:700])
+    rc, d, raw = doc_json(env=dict(ENV, PATH=str(root / "t26-empty")))
+    check("T26 什麼都沒有：gitleaks ✗、pip-audit 不在 PATH 時仍從 .venv 找到、送審 Python 有實體路徑",
+          rc == 0 and item(d, "gitleaks")["ok"] is False and item(d, "python")["detail"], json.dumps(d, ensure_ascii=False)[:500])
+    rc, out, err = sh([PY, str(p17kit), "doctor", "--codex", str(fake)], cwd=p17)
+    check("T26 白話輸出有表格與「只提醒」說明", rc == 0 and "| Codex 登入 | ✓ |" in out and "只提醒" in out and "唯讀" in out, out[-500:])
+    check("T26 唯讀：doctor 跑完專案每個檔位元組都沒變", tree_bytes(p17) == p17_before)
+    check("T26 --json 欄位齊全", all(k in d for k in ("target", "items", "project", "note"))
+          and {i["key"] for i in d["items"]} == {"git", "codex", "codex_login", "node_repl", "gitleaks", "pip_audit", "python"}, str(d)[:300])
+
+    # ---------------- T27 state.json 不進版控：.gitignore 補一行、仍被追蹤只提醒不動 index（未發版）
+    p19 = new_git_project(root, "p19-state-ignore")
+    rc, out, err = kit("install", "--target", str(p19))
+    gi = read(p19 / ".gitignore")
+    check("T27 新裝專案 .gitignore 含 .ai-review/state.json、git 也認定忽略",
+          rc == 0 and ".ai-review/state.json" in gi.splitlines() and git("check-ignore", "-q", ".ai-review/state.json", cwd=p19)[0] == 0, gi)
+    check("T27 新裝專案（state.json 沒被追蹤）不出現版控提醒", "還在版控" not in out, out[-300:])
+    p20 = new_git_project(root, "p20-state-manual")
+    write(p20 / ".gitignore", "node_modules/\n.ai-review/state.json\n")
+    kit("install", "--target", str(p20))
+    kit("update", "--target", str(p20))
+    gi = read(p20 / ".gitignore")
+    check("T27 已經手動加過同一行 → install／update 都不重複（其他三行照補）", gi.splitlines().count(".ai-review/state.json") == 1
+          and gi.count("# ai-review-kit") <= 1 and ".ai-review/local.json" in gi.splitlines(), gi)
+    # 模擬舊版：.gitignore 沒有這行、state.json 已被 commit
+    p21 = new_git_project(root, "p21-state-tracked")
+    kit("install", "--target", str(p21))
+    write(p21 / ".gitignore", read(p21 / ".gitignore").replace(".ai-review/state.json\n", ""))
+    git("add", "-A", cwd=p21)
+    git("add", "-f", ".ai-review/state.json", cwd=p21)
+    git("commit", "-q", "-m", "old kit commits state.json", cwd=p21)
+    idx_before = (p21 / ".git/index").read_bytes()
+    rc, out, err = kit("update", "--target", str(p21))
+    gi = read(p21 / ".gitignore")
+    check("T27 舊專案 update 補上 .gitignore 那一行（不重複標題）",
+          rc == 0 and gi.splitlines().count(".ai-review/state.json") == 1 and gi.count("# ai-review-kit") == 1, gi)
+    check("T27 state.json 仍被追蹤 → 白話提醒 git rm --cached，且說檔案會留著",
+          "還在版控" in out and "git rm --cached .ai-review/state.json" in out and "檔案會留在電腦上" in out, out[-500:])
+    rc2, ls, _ = git("ls-files", "--error-unmatch", ".ai-review/state.json", cwd=p21)
+    check("T27 kit 沒有自己 git rm：state.json 還在 index、index 檔位元組沒變",
+          rc2 == 0 and (p21 / ".git/index").read_bytes() == idx_before and (p21 / ".ai-review/state.json").exists())
+
     # ---------------- 總結
     fails = [r for r in RESULTS if not r[1]]
     print(f"\n共 {len(RESULTS)} 項，通過 {len(RESULTS) - len(fails)}，失敗 {len(fails)}")

@@ -23,10 +23,10 @@
 <專案>/
 ├ CLAUDE.md                  入口規則（管理區塊，安裝工具維護）
 ├ AGENTS.md                  入口規則（同上，給 Codex）
-├ .ai-review/                本流程的專案資料（要 commit，除了 .cache 與 .backup）
+├ .ai-review/                本流程的專案資料（要 commit，除了 .cache、.backup、local.json、state.json）
 │  ├ kit/                    通用規範與工具的副本（本檔在此；kit.py 也在此）
 │  ├ config.md               專案專屬設定：風險、既有檢查、檢查命令、關卡規則（/safety-setup 產生）
-│  ├ state.json              推導出來的狀態（追蹤資料，不是安全證明）
+│  ├ state.json              本機推導的狀態，不提交（追蹤資料，不是安全證明；gate 與 CI 都現場推導，不讀提交的版本）
 │  ├ handoffs/H-*.md         交接報告（開發 AI 寫）
 │  ├ reviews/R-*.md          獨立審查報告（審查 AI 寫）
 │  ├ fixes/F-*.md            修正報告（開發 AI 寫）
@@ -76,6 +76,7 @@ R.reviewer 是開發 AI 自己（self/claude） → 不算，視同沒有審查
 
 ```
 /safety-setup（每個專案一次）
+   → kit.py ignore-check（唯讀：.gitignore 少排除的機密條目記進第 6 節，要不要補由使用者決定）
    → .ai-review/config.md
 開發 … 做完一個完整變更
 /review-ready
@@ -112,10 +113,12 @@ py -3 .ai-review/kit/kit.py gate          合併／部署前的關卡（只有 n
 py -3 .ai-review/kit/kit.py snapshot      建交接快照（通常由 /review-ready 呼叫）
 py -3 .ai-review/kit/kit.py checks --run  執行 config.md 的檢查命令並記錄
 py -3 .ai-review/kit/kit.py verify        核對目前指紋與最新交接
-py -3 .ai-review/kit/kit.py state         重新推導 state.json
+py -3 .ai-review/kit/kit.py state         重新推導 state.json（加 --json --no-write：只印、不寫任何檔）
+py -3 .ai-review/kit/kit.py doctor        送審前還缺什麼（Codex、登入、gitleaks…；唯讀）
+py -3 .ai-review/kit/kit.py ignore-check  .gitignore 有沒有排除機密與 AI 逐字稿（唯讀）
 py -3 .ai-review/kit/kit.py codex-review  啟動 Codex 審查最新交接（等跑完；--detach 丟背景、--print 只看命令）
 ```
 
 macOS／Linux 把 `py -3` 換成 `python3`。
 
-`codex-review` 的固定做法：`codex exec -C <專案> -s workspace-write "$independent-review <H-id>"`；TMP／TEMP 指 `.ai-review/.cache/tmp`（Codex 沙箱不准寫系統暫存）；環境變數 `AI_REVIEW_PYTHON` 給沙箱用的實體直譯器（Windows 的 `py` 是應用程式別名，沙箱啟動不了）；這個變數與 `SystemDrive`、`SystemRoot` 等用 `-c` 帶進沙箱：shell 工具走官方的 `shell_environment_policy.set`，Codex 改用 node_repl 工具時走 `mcp_servers.node_repl.env` 並加進它的放行名單（只對這次審查有效，不改 Codex 設定檔；少了 `SystemDrive` 時 Windows 元件會在專案根目錄建字面名稱的 `%SystemDrive%\` 資料夾，打壞指紋）；不加 `-m`（模型照 Codex 設定檔）、永遠不用 `--dangerously-bypass-approvals-and-sandbox`；紀錄寫 `.ai-review/.cache/codex-<H-id>.log`，結束寫 `.done`（exit、審查編號、結論）；審前審後比對工作區（與指紋同一套收檔規則），審查期間多出、改掉或刪掉的檔會印警告並寫進 `.done`（`workspace_changes`、`fingerprint_drift`）與紀錄，**不自動刪**——先看是什麼再決定。指紋計算的新物件寫在暫存物件庫，所以 Codex 不需要 `.git` 的寫入權。
+`codex-review` 的固定做法：`codex exec -C <專案> -s workspace-write "$independent-review <H-id>"`；TMP／TEMP 指 `.ai-review/.cache/tmp`（Codex 沙箱不准寫系統暫存）；環境變數 `AI_REVIEW_PYTHON` 給沙箱用的實體直譯器（Windows 的 `py` 是應用程式別名，沙箱啟動不了）；這個變數與 `SystemDrive`、`SystemRoot` 等用 `-c` 帶進沙箱：shell 工具走官方的 `shell_environment_policy.set`，Codex 改用 node_repl 工具時走 `mcp_servers.node_repl.env` 並加進它的放行名單（只對這次審查有效，不改 Codex 設定檔；少了 `SystemDrive` 時 Windows 元件會在專案根目錄建字面名稱的 `%SystemDrive%\` 資料夾，打壞指紋）；不加 `-m`（模型照 Codex 設定檔）、永遠不用 `--dangerously-bypass-approvals-and-sandbox`；紀錄寫 `.ai-review/.cache/codex-<H-id>.log`，結束寫 `.done`（exit、審查編號、結論）；審前審後比對工作區（與指紋同一套收檔規則），審查期間多出、改掉或刪掉的檔會印警告並寫進 `.done`（`workspace_changes`、`fingerprint_drift`）與紀錄；另外比對專案根目錄與第一層資料夾的清單（**包括 .gitignore 排除的**，`.ai-review/.cache/` 除外），多出來的寫進 `new_ignored_entries` 並警告（不算指紋）；**不自動刪**——先看是什麼再決定。指紋計算的新物件寫在暫存物件庫，所以 Codex 不需要 `.git` 的寫入權。

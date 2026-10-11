@@ -52,9 +52,9 @@
 
 ## 4. 不分類型一律要看的（最低限度）
 
-- 秘密掃描：程式碼、設定、註解、測試資料、git 歷史。工具例：`gitleaks detect`（有裝才用，沒裝就記「未執行」）。
+- 秘密掃描：程式碼、設定、註解、測試資料、git 歷史。工具例：`gitleaks detect --no-banner --redact`（有裝才用，沒裝就記「未執行」；`--redact` 讓輸出遮蔽金鑰原文，不讓它進 checks 紀錄與交接報告）。
 - 依賴漏洞：對應語言的 audit 指令；沒網路就記「未執行」。
-- `.gitignore` 是否涵蓋 `.env`、`*.local.*`、`credentials*`、IDE 個人設定、含使用者名稱的絕對路徑。
+- `.gitignore` 是否涵蓋 `.env`、`*.local.*`、`credentials*`、IDE 個人設定、含使用者名稱的絕對路徑。機密與 AI 逐字稿的標準清單用 `kit.py ignore-check` 檢查（唯讀，不改 `.gitignore`）。
 - 含 Windows 使用者名稱或公司名的絕對路徑不得進入會公開的 repo。
 - 新增的對外入口（HTTP 端點、命令列參數、檔案匯入）都在 config.md 第 1 節登記過。
 

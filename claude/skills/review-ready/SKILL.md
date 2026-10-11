@@ -10,7 +10,7 @@ argument-hint: "[--recheck R-xxx] [--base <ref>] [一句話描述本次變更範
 
 ## 前置
 
-- 沒有 `.ai-review/config.md` → 停下來告訴使用者先跑 `/safety-setup`。
+- 跑 `py -3 .ai-review/kit/kit.py state --json`，看 `initialized`。是 `false`（沒有 config.md、meta 沒填、或第 4 節沒有檢查命令）→ **停下來**，把 `init_reason` 白話轉告使用者，請他先跑 `/safety-setup`，不要交接。
 - 先確認這次變更**已經做完**。還在改就不要交接。
 - 參數：`$ARGUMENTS` 可能含 `--recheck R-xxx`（修正後重交）、`--base <ref>`、以及範圍描述。
 

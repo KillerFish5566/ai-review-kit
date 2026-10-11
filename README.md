@@ -39,7 +39,7 @@ ai-review-kit/
 ├ claude/skills/   safety-setup、review-ready、review-fix（Claude Code Skills）
 ├ codex/skills/    independent-review（Codex Skill，裝到專案 .agents/skills/）
 ├ tools/kit.py     安裝／更新／狀態／還原／打包 ＋ 專案內的快照／檢查／狀態／關卡／hook
-├ tools/tests/     自動化驗證（暫存專案，106 個檢查點）
+├ tools/tests/     自動化驗證（暫存專案，161 個檢查點）
 └ docs/            codex-start.md（讓 Codex 接手）、daily-usage.md（日常）、offline-setup.md（帶到不能連 GitHub 的電腦）
 ```
 
@@ -56,10 +56,10 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 - 放 Skills 到 `.claude/skills/`（Claude）與 `.agents/skills/`（Codex）
 - 在 `CLAUDE.md`、`AGENTS.md` **附加**一個管理區塊（`<!-- ai-review-kit:begin … end -->`），區塊外的內容不動
 - 在 `.claude/settings.json` 合併兩個 hook（SessionStart、Stop），其他設定不動；`.codex/hooks.json` 加一個 SessionStart（Codex 端需在 `/hooks` 信任後才會跑）
-- `.gitignore` 加 `.ai-review/.cache/`、`.ai-review/.backup/`、`.ai-review/local.json`
+- `.gitignore` 加 `.ai-review/.cache/`、`.ai-review/.backup/`、`.ai-review/local.json`、`.ai-review/state.json`（已有的行不重複加）。舊版裝過、`state.json` 還在版控的專案，install／update 會提醒你自己跑 `git rm --cached .ai-review/state.json` 再存一個版本；kit 不自己動版控
 - 記錄到 `.ai-review/kit-version.json`（進版控，不含本機路徑）；這台電腦的直譯器與套件來源記在 `.ai-review/local.json`（不進版控）；改動前的檔案備份到 `.ai-review/.backup/<時間>/`
 
-然後在專案根目錄開 Claude Code（hooks 要重開才載入），執行 `/safety-setup`。
+然後先跑 `py -3 .ai-review/kit/kit.py doctor` 看還缺什麼（Codex 有沒有裝、有沒有登入、gitleaks 等），再在專案根目錄開 Claude Code（hooks 要重開才載入），執行 `/safety-setup`。
 
 其他指令：
 
@@ -67,10 +67,13 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 |---|---|
 | `install --preview` | 只看會動哪些檔案與差異（含 hook、設定檔、`.gitignore`、紀錄檔），不寫入 |
 | `update --source <資料夾或 zip> [--preview]` | 更新；三方比對（安裝時／目前／新來源），使用者改過的保留，兩邊都改的列為衝突不覆蓋，`--take-source <路徑>` 才採用來源 |
-| `status` | 套件版本、來源版本、使用者改過哪些檔、hooks／Skills／入口是否就位、目前流程狀態 |
+| `status` | 套件版本、來源版本、使用者改過哪些檔、hooks／Skills／入口是否就位、目前流程狀態（會重寫 `state.json`） |
+| `state --json --no-write` | 只推導狀態、印 JSON，**不寫任何檔**（不寫 `state.json`、不寫 `.cache/`）；給工作根目錄的轉接 hook 等外部程式讀。欄位含 `status`、`status_label`、`initialized`、`init_reason`、`fresh`、`handoff`、`review`、`open_items`。舊版 kit 沒有這個旗標，argparse 會回 **exit 2**，呼叫端可拿 exit 2 當「舊版、略過」 |
+| `doctor [--json]` | 唯讀列出送審前還缺什麼：git、Codex 在不在 PATH、有沒有登入（先確認這版 codex 有 `login status` 才查，只查不登入、不印帳號；沒有就請你自己確認）、node_repl 有沒有設定、gitleaks／pip-audit（含專案 `.venv`）、送審會用哪個實體 Python；已安裝專案另列初始化狀態與 `config.md` 第 6 節未解幾項。只提醒，exit 0 |
 | `restore --yes` | 還原最近一次安裝／更新前的狀態（先列清單）；可逐次往前還原 |
 | `relink [--python "py -3"]` | 換電腦後重寫 hook 的直譯器、重建 `local.json` |
 | `codex-review [--detach] [--print]` | 在專案裡執行：用工作區沙箱啟動 Codex 審查最新交接，紀錄寫 `.ai-review/.cache/codex-<H>.log`，結束寫 `.done`；找不到 codex 時 exit 3 並提示手動退路。用 `-c` 把 `AI_REVIEW_PYTHON`、`SystemDrive` 等環境變數帶進沙箱（只對這次有效，不改 Codex 設定檔；`--print` 列出全部）；審完比對工作區，審查期間多出或被改的檔會警告並寫進 `.done`，不自動刪 |
+| `ignore-check [--json]` | 唯讀檢查 `.gitignore` 有沒有排除標準機密清單（`.env`、金鑰與憑證、`.claude/projects/` 對話逐字稿、`*.jsonl`、`memory/` 等 15 條），並列出已被 git 追蹤、但符合清單的檔（只列路徑、不印內容）。`/safety-setup` 盤點時會跑，缺的記進 `config.md` 第 6 節。只提醒、不是關卡，**不會改 `.gitignore`**；缺漏也 exit 0。本專案是正常資料的條目（例如題庫 `*.jsonl`）在 `config.md` 的 ```` ```ignore-ok ```` 區塊記「條目 \| 日期 \| 理由」，之後不再列為缺漏 |
 | `pack` | 打離線 zip 到 `dist/` |
 | `check-update --url <VERSION 檔網址>` | 只查版本號，不自動更新；沒網路就如實說「未檢查更新」 |
 
@@ -84,6 +87,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 | 審查說要修 | `/review-fix R-編號` |
 | 合併／部署前 | `py -3 .ai-review/kit/kit.py gate` |
 | 想看狀態 | `py -3 .ai-review/kit/kit.py status` |
+| 裝完或換電腦，想知道還缺什麼 | `py -3 .ai-review/kit/kit.py doctor` |
 
 ## 更新套件（跨電腦）
 
@@ -95,6 +99,8 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 ## 限制（誠實版）
 
 - hook 只做機械判斷（版本、指紋是否相符、有沒有未結案）。它不掃描程式碼、不呼叫另一個 AI、不能擋住 push 或部署。
+- 開場狀態與收工提醒（hook）只有在**專案資料夾直接開 Claude Code** 才會跑（hook 寫在專案自己的 `.claude/settings.json`）；從上層資料夾開的對話不會自動提醒，要自己跑 `kit.py state` 或 `/review-ready`。
+- 審查紀錄（`.ai-review/handoffs`、`reviews`、`fixes`）跟著 git 分支走：換分支後看到的是那個分支的狀態，不是審查不見了。
 - `gate` 是本地檢查，可以被略過。要強制，得在 GitHub 設 branch protection 並讓 CI 跑 gate（`templates/ci/github-actions-gate.yml` 是範例，尚未在真實 repo 驗證）。
 - 狀態檔與報告裡的「通過」文字不是安全證明；證明是「哪個指紋、誰審、看了什麼、怎麼查」。
 - 非 git 專案沒有快照參照，指紋改用檔案雜湊。
@@ -108,4 +114,4 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 ```
 py -3 tools/tests/test_kit.py
 ```
-在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、預覽列出實裝會寫的每一個檔、指紋不寫進專案 git 物件庫、`codex-review` 的命令形狀／環境／拒絕條件／帶進沙箱的 `-c` 設定／審後多出檔案的警告（假 codex）、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update。測試資料夾不會自動刪除。
+在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、預覽列出實裝會寫的每一個檔、指紋不寫進專案 git 物件庫、`codex-review` 的命令形狀／環境／拒絕條件／帶進沙箱的 `-c` 設定／審後多出檔案的警告（假 codex）、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update、`ignore-check`（全缺／全有／部分缺／否定規則／只在本機排除／已追蹤檔只列路徑／標記不排除後不再列／唯讀／非 git）、「已初始化」要 meta＋檢查命令、審後看得到 .gitignore 排除位置多出的東西、`state --no-write` 不寫任何檔、第 6 節狀態欄新舊格式、`doctor`（假 codex／假 PATH，不觸發登入、唯讀）、`state.json` 不進版控（只提醒、不動 index）。測試資料夾不會自動刪除。

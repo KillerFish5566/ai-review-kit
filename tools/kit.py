@@ -5,7 +5,7 @@ ai-review-kit 工具（純 Python 標準函式庫，Python 3.9+）
 
 兩種身分、同一支檔案：
   A. 放在套件來源 `ai-review-kit/tools/kit.py`  → 管理指令：install / update / restore / status / pack / check-update
-  B. 被安裝到專案 `<專案>/.ai-review/kit/kit.py` → 專案指令：status / snapshot / checks / state / verify / gate / new-id / codex-review / hook / relink
+  B. 被安裝到專案 `<專案>/.ai-review/kit/kit.py` → 專案指令：status / snapshot / checks / state / verify / gate / new-id / codex-review / ignore-check / doctor / hook / relink
      （B 也能跑 update，來源用 --source 指定，或用安裝紀錄裡記住的來源路徑）
 
 設計要點
@@ -46,7 +46,8 @@ HOOK_TAG = ".ai-review/kit/kit.py"          # 辨識「我們的」hook 條目
 BLOCK_BEGIN_RE = re.compile(r"^<!-- ai-review-kit:begin[^\n]*-->[ \t]*\r?\n?", re.M)
 BLOCK_END = "<!-- ai-review-kit:end -->"
 BLOCK_END_RE = re.compile(r"^<!-- ai-review-kit:end -->[ \t]*\r?\n?", re.M)
-GITIGNORE_LINES = ["# ai-review-kit（本機資料，不提交）", ".ai-review/.cache/", ".ai-review/.backup/", ".ai-review/local.json"]
+GITIGNORE_LINES = ["# ai-review-kit（本機資料，不提交）", ".ai-review/.cache/", ".ai-review/.backup/", ".ai-review/local.json",
+                   ".ai-review/state.json"]   # state.json＝本機推導的追蹤資料，進版控只會讓工作區一直顯示已修改（未發版）
 LOCAL_KEYS = ("python", "python_args", "source")   # 每台電腦不同、可能含使用者名稱 → 存 local.json，不進版控
 HOOK_KIT_PY = "${CLAUDE_PROJECT_DIR}/.ai-review/kit/kit.py"   # Claude Code 執行 hook 前會展開（2026-09-18 實測 exec 形式可用）
 EXCLUDE_DIRS = {".git", ".ai-review", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
@@ -689,12 +690,24 @@ def do_install_or_update(args, mode):
     dump_json(manifest_path(target), new_manifest_obj)
     # 狀態
     derive_and_write_state(target, quiet=True)
+    state_tracked_reminder(target)
     print(f"\n完成（{mode}）：寫入 {len(r.created)} 個新檔、修改 {len(r.backed_up)} 個既有檔（備份在 {rel(r.backup_dir, target) if r.backup_dir.exists() else '無'}）。")
     if conflicts:
         print("有衝突項目未處理，見上方清單。")
-    print("下一步：在專案根目錄開 Claude Code，執行 /safety-setup（每個專案一次）。hooks 要重開 Claude Code 才載入。")
+    print(f"下一步：先跑 `py -3 \"{target / '.ai-review' / 'kit' / 'kit.py'}\" doctor` 看還缺什麼（Codex、登入、gitleaks…），"
+          "再在專案根目錄開 Claude Code 跑 /safety-setup（每個專案一次）。hooks 要重開 Claude Code 才載入。")
     src.cleanup()
     return 0
+
+
+def state_tracked_reminder(target):
+    """state.json 還被 git 追蹤時只提醒，kit 不自己 git rm（會動使用者的版控）。只讀 index。"""
+    rc, _, _ = run(["git", "ls-files", "--error-unmatch", ".ai-review/state.json"], cwd=target)
+    if rc == 0:
+        print("\n提醒：.ai-review/state.json 還在版控（它是本機推導的狀態，已加進 .gitignore，但已追蹤的檔 .gitignore 管不到）。"
+              "要移出請在專案根目錄跑 `git rm --cached .ai-review/state.json` 再存一個版本（檔案會留在電腦上）。kit 不會自己動版控。")
+        return True
+    return False
 
 
 def do_relink(args):
@@ -875,6 +888,48 @@ def literal_env_dirs(target):
         return []
 
 
+def shallow_listing(target):
+    """專案根目錄與第一層資料夾的項目清單，**包括 .gitignore 排除的**（G5，未發版）。
+    指紋與 workspace_listing 照 .gitignore 收檔，看不到審查寫進被排除位置（例如 data/）的東西；這份清單補這個盲點。
+    不含 .git/ 內部；.ai-review/.cache/ 底下是審查預期會寫的，不列。資料夾以 / 結尾。"""
+    target = Path(target)
+    out = set()
+    try:
+        top = list(target.iterdir())
+    except OSError:
+        return out
+    for p in top:
+        if p.name == ".git":
+            continue
+        is_dir = p.is_dir()
+        out.add(p.name + ("/" if is_dir else ""))
+        if not is_dir:
+            continue
+        try:
+            for c in p.iterdir():
+                r = f"{p.name}/{c.name}"
+                if r == ".ai-review/.cache":
+                    continue
+                out.add(r + ("/" if c.is_dir() else ""))
+        except OSError:
+            out.add(p.name + "/(無法列出內容)")
+    return out
+
+
+def new_shallow_entries(before, after, changes=None, env_dirs=()):
+    """審後多出來、而且沒被 workspace_changes／字面環境變數資料夾提醒涵蓋的淺層項目（多半是寫進 .gitignore 排除的位置）。"""
+    added_files = (changes or {}).get("added", [])
+    out = []
+    for e in sorted(set(after) - set(before)):
+        stem = e.rstrip("/")
+        if stem.split("/", 1)[0] in env_dirs:
+            continue
+        if any(f == stem or f.startswith(stem + "/") for f in added_files):
+            continue
+        out.append(e)
+    return out
+
+
 def workspace_changes(before, after):
     b, a = set(before), set(after)
     return {"added": sorted(a - b), "modified": sorted(p for p in a & b if before[p] != after[p]),
@@ -921,6 +976,24 @@ def parse_checks(target):
         if name and cmd:
             rows.append({"name": name, "command": cmd, "required": req})
     return rows
+
+
+def config_initialized(target):
+    """「已初始化」＝config.md 存在、meta 區塊有填（不是範本的 {{…}}）、第 4 節 checks 至少一條命令（G7，未發版）。
+    回傳 (是否, 白話原因)。只讀 config.md。"""
+    cfg = Path(target) / ".ai-review" / "config.md"
+    if not cfg.exists():
+        return False, "沒有 .ai-review/config.md，請執行 /safety-setup"
+    meta = config_meta(target)
+    filled = bool(meta) and not any("{{" in v for v in meta.values())   # 範本原樣有 {{KIT_VERSION}}、{{DATE}}
+    rows = parse_checks(target) or []
+    if not filled and not rows:
+        return False, "config.md 只有部分內容（meta 沒填、第 4 節沒有檢查命令），請先執行 /safety-setup"
+    if not filled:
+        return False, "config.md 的 meta 區塊沒有填（還是範本內容），請先執行 /safety-setup"
+    if not rows:
+        return False, "config.md 第 4 節沒有任何檢查命令，請先執行 /safety-setup"
+    return True, "已完成"
 
 
 def next_id(target, prefix):
@@ -1087,17 +1160,17 @@ def latest_report(target, kind_dir):
 
 
 def derive_state(target, with_fp=True):
-    initialized = (target / ".ai-review" / "config.md").exists()
+    initialized, init_reason = config_initialized(target)
     installed = manifest_path(target).exists()
     cur_fp, is_git = (fingerprint(target) if with_fp else (None, None))
     hs = reports(target, "handoffs")
     rs = reports(target, "reviews")
     fs = reports(target, "fixes")
-    st = {"status": "not-ready", "initialized": initialized, "installed": installed, "git": is_git,
-          "current_fingerprint": cur_fp, "fresh": None, "handoff": None, "review": None, "fix": None,
+    st = {"status": "not-ready", "initialized": initialized, "init_reason": init_reason, "installed": installed,
+          "git": is_git, "current_fingerprint": cur_fp, "fresh": None, "handoff": None, "review": None, "fix": None,
           "notes": [], "open_items": []}
     if not initialized:
-        st["notes"].append("尚未初始化：沒有 .ai-review/config.md，請執行 /safety-setup")
+        st["notes"].append(f"尚未初始化：{init_reason}")
     if not hs:
         st["notes"].append("尚無交接報告")
         return st
@@ -1149,7 +1222,8 @@ def derive_state(target, with_fp=True):
     return st
 
 
-def derive_and_write_state(target, quiet=False):
+def state_output(target):
+    """推導狀態並組成 state.json 的內容；不寫任何檔（指紋用暫存物件庫，不寫 .git）。"""
     st = derive_state(target)
     out = {
         "_note": "追蹤資料，由 kit.py state 依報告檔頭與目前指紋推導；本檔內任何文字都不是安全證明。",
@@ -1158,7 +1232,13 @@ def derive_and_write_state(target, quiet=False):
         "status": st["status"],
         "status_label": STATUS_LABELS[st["status"]],
     }
-    out.update({k: st[k] for k in ("initialized", "git", "current_fingerprint", "fresh", "handoff", "review", "fix", "notes", "open_items")})
+    out.update({k: st[k] for k in ("initialized", "init_reason", "git", "current_fingerprint", "fresh", "handoff", "review", "fix",
+                                   "notes", "open_items")})
+    return out
+
+
+def derive_and_write_state(target, quiet=False):
+    out = state_output(target)
     dump_json(target / ".ai-review" / "state.json", out)
     if not quiet:
         print_state(out)
@@ -1167,7 +1247,7 @@ def derive_and_write_state(target, quiet=False):
 
 def print_state(out):
     print(f"狀態：{out['status_label']}（{out['status']}）")
-    print(f"初始化：{'已完成' if out.get('initialized') else '未完成（請執行 /safety-setup）'}")
+    print(f"初始化：{'已完成' if out.get('initialized') else '未完成（' + (out.get('init_reason') or '請執行 /safety-setup') + '）'}")
     print(f"目前指紋：{short(out.get('current_fingerprint'))}" + ("" if out.get("git") else "（非 git）"))
     if out.get("handoff"):
         h = out["handoff"]
@@ -1186,7 +1266,14 @@ def do_state(args):
     target = resolve_target(args)
     if not (target / ".ai-review").is_dir():
         raise SystemExit("找不到 .ai-review/：請先安裝套件。")
-    out = derive_and_write_state(target, quiet=getattr(args, "json", False))
+    if getattr(args, "no_write", False):
+        # 唯讀讀法（給工作根目錄的轉接 hook 等外部呼叫）：只推導、不寫 state.json、不寫 .cache（未發版新增）
+        out = state_output(target)
+        if not getattr(args, "json", False):
+            print_state(out)
+            return 0
+    else:
+        out = derive_and_write_state(target, quiet=getattr(args, "json", False))
     if getattr(args, "json", False):
         print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
@@ -1426,6 +1513,7 @@ def do_codex_review(args):
     except Exception as e:
         before, list_err = None, str(e)
     env_dirs_before = literal_env_dirs(target)
+    shallow_before = shallow_listing(target)
     started = now_str()
     write_text(running, json.dumps({"handoff": hid, "pid": os.getpid(), "started": started}, ensure_ascii=False) + "\n")
     print(f"Codex 審查交接 {hid} 開始（{started}），紀錄寫到 {rel(log, target)}")
@@ -1448,6 +1536,7 @@ def do_codex_review(args):
             "review": r.get("id") if r else None, "verdict": r.get("verdict") if r else None,
             "sandbox_env": ov_notes}
     warn = []
+    ch = None
     if before is None:
         warn.append(f"審前工作區清單沒取到（{list_err[:200]}），沒辦法比對審查期間有沒有多出檔案。")
     else:
@@ -1471,6 +1560,15 @@ def do_codex_review(args):
         info["literal_env_dirs"] = new_env_dirs
         warn.append(f"⚠️ 審查期間專案根目錄出現字面名稱的資料夾：{'、'.join(new_env_dirs)}——沙箱裡少了對應的環境變數"
                     "（被 .gitignore 排除時不影響指紋，但表示環境變數沒帶進去）。kit 不會自動刪。")
+    shallow_new = new_shallow_entries(shallow_before, shallow_listing(target), ch, new_env_dirs)
+    if shallow_new:
+        info["new_ignored_entries"] = shallow_new[:200]
+        warn.append(f"⚠️ 審查期間專案根目錄或第一層資料夾多了 {len(shallow_new)} 項（多半在 .gitignore 排除的位置，例如個人資料夾；"
+                    "不算進指紋，但審查不該寫到那裡）。先看是什麼再決定；kit 不會自動刪。")
+        for e in shallow_new[:20]:
+            warn.append(f"  新增：{e}")
+        if len(shallow_new) > 20:
+            warn.append(f"  …共 {len(shallow_new)} 項，完整清單見 {rel(done, target)}")
     if out.get("fresh") is False:
         info["fingerprint_drift"] = True
         warn.append(f"⚠️ 目前指紋 {short(out.get('current_fingerprint'))} 與交接目標 {short((out.get('handoff') or {}).get('target'))} 不符，"
@@ -1516,7 +1614,7 @@ def hook_session_start(target, payload, agent="claude"):
     ver = kit_version_of(target) or "?"
     st = derive_state(target)
     lines = [f"[ai-review-kit v{ver}] 專案流程狀態（由 hook 自動推導；不是安全證明）"]
-    lines.append("- 初始化：" + ("已完成" if st["initialized"] else "未完成 → 請執行 /safety-setup"))
+    lines.append("- 初始化：" + ("已完成" if st["initialized"] else f"未完成 → {st['init_reason']}"))
     lines.append(f"- 目前狀態：{STATUS_LABELS[st['status']]}（{st['status']}）")
     if st.get("handoff"):
         lines.append(f"- 最新交接：{st['handoff']['id']}，目標指紋 {short(st['handoff']['target'])}，"
@@ -1684,6 +1782,313 @@ def do_check_update(args):
     return 0
 
 
+# ---------------------------------------------------------------- ignore-check（.gitignore 機密清單檢查，唯讀）
+# 標準清單以套件自己的 .gitignore（防手滑、機密與金鑰、AI 工具的逐字稿與記憶）為準。
+# 每條：(建議寫進 .gitignore 的那一行, 代表性的假路徑, 白話說明)。
+# 判斷全交給 git（check-ignore --no-index 對假路徑、ls-files -ci --exclude 找已追蹤檔），不自己解析 gitignore 語法。
+# .claude/ 整個排除會把套件裝的 .claude/skills/、.claude/settings.json 一起擋掉（那些要進版控），所以只要求 .claude/projects/。
+SECRET_IGNORE_RULES = [
+    (".env", ".env", "環境變數檔，常放 API 金鑰與密碼"),
+    (".env.*", ".env.local", "各環境的環境變數檔（.env.local、.env.production…），內容同上"),
+    ("*.local.*", "config.local.json", "本機專用設定（命名慣例 *.local.*），常含個人路徑或金鑰"),
+    ("credentials*", "credentials.json", "雲端服務或程式的登入憑證檔"),
+    ("secrets.*", "secrets.yaml", "秘密設定檔（命名就是放秘密的）"),
+    (".claude/settings.local.json", ".claude/settings.local.json", "Claude Code 的個人本機設定，含個人權限與路徑"),
+    ("*.pem", "server.pem", "憑證或私鑰檔（PEM 格式）"),
+    ("*.key", "private.key", "私鑰檔"),
+    ("*.pfx", "cert.pfx", "含私鑰的憑證包（Windows 常見）"),
+    ("*.p12", "cert.p12", "含私鑰的憑證包（PKCS#12）"),
+    ("id_rsa*", "id_rsa", "SSH 私鑰（RSA）"),
+    ("id_ed25519*", "id_ed25519", "SSH 私鑰（Ed25519）"),
+    (".claude/projects/", ".claude/projects/demo/notes.md",
+     "Claude Code 的對話逐字稿與專案記憶；不要整個 .claude/ 排除（套件的 skills 與 settings.json 要進版控）"),
+    ("*.jsonl", "logs/session.jsonl", "AI 工具的對話逐字稿常用格式（每行一筆 JSON）"),
+    ("memory/", "memory/notes.md", "AI 工具的記憶資料夾，可能含個人偏好與內部資訊"),
+]
+IGNORE_OK_RE = re.compile(r"```ignore-ok[ \t]*\n(.*?)```", re.S)
+
+
+def parse_ignore_ok(target):
+    """config.md 的 ```ignore-ok 區塊：一行一條「條目 | 日期 | 理由」，# 開頭是註解。回傳 {條目: {date, reason}}。"""
+    cfg = Path(target) / ".ai-review" / "config.md"
+    if not cfg.exists():
+        return {}
+    m = IGNORE_OK_RE.search(norm_nl(read_text(cfg)))
+    if not m:
+        return {}
+    ok = {}
+    for line in m.group(1).splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = [x.strip() for x in s.split("|")]
+        if not parts[0] or parts[0] in ("條目", "pattern"):
+            continue
+        ok[parts[0]] = {"date": parts[1] if len(parts) > 1 else "", "reason": parts[2] if len(parts) > 2 else ""}
+    return ok
+
+
+def _check_ignore_probes(target, probes):
+    """回傳 {假路徑: (是否被排除, 來源檔, 規則)}；用 git 本身判斷（含否定規則 !…）。"""
+    data = "".join(p + "\0" for p in probes).encode("utf-8")
+    rc, out, err = run(["git", "-c", "core.quotePath=false", "check-ignore", "--no-index", "-v", "-n", "-z", "--stdin"],
+                       cwd=target, input_text=data)
+    if rc not in (0, 1):      # 0＝有符合、1＝都不符合；其他是錯誤
+        raise RuntimeError("git check-ignore 失敗：" + (err.strip() or f"exit {rc}"))
+    f = out.split("\0")
+    res = {}
+    for i in range(0, len(f) - 3, 4):
+        source, _line, pattern, path = f[i], f[i + 1], f[i + 2], f[i + 3]
+        res[path] = (bool(pattern) and not pattern.startswith("!"), source, pattern)
+    return res
+
+
+def _tracked_matching(target, pattern):
+    rc, out, err = run(["git", "-c", "core.quotePath=false", "ls-files", "-z", "--cached", "--ignored",
+                        f"--exclude={pattern}"], cwd=target)
+    if rc != 0:
+        raise RuntimeError("git ls-files 失敗：" + (err.strip() or f"exit {rc}"))
+    return sorted({p for p in out.split("\0") if p})
+
+
+def ignore_check(target):
+    """唯讀：不改 .gitignore、不改 config.md、不寫 state、不寫 .git。"""
+    target = Path(target)
+    info = {"target": str(target), "git": False, "rules": [], "missing": [], "accepted": [], "tracked": [],
+            "suggested_lines": [], "note": "唯讀提醒，不是關卡；不會自動修改 .gitignore。"}
+    rc, out, err = run(["git", "rev-parse", "--is-inside-work-tree"], cwd=target)
+    if rc == 127:
+        raise RuntimeError("找不到 git 指令")
+    if rc != 0 or out.strip() != "true":
+        return info
+    info["git"] = True
+    info["gitignore_exists"] = (target / ".gitignore").exists()
+    ok = parse_ignore_ok(target)
+    probes = _check_ignore_probes(target, [r[1] for r in SECRET_IGNORE_RULES])
+    for line, probe, why in SECRET_IGNORE_RULES:
+        ignored, source, pat = probes.get(probe, (False, "", ""))
+        src = source.replace("\\", "/")
+        # 專案裡的 .gitignore 會印相對路徑；.git/info/exclude 與全域 excludesFile（可能也叫 .gitignore）是本機設定
+        in_repo = (ignored and Path(src).name == ".gitignore" and not src.startswith((".git/", "/", "~"))
+                   and not re.match(r"^[A-Za-z]:", src))
+        if line in ok:
+            status = "accepted"
+        elif in_repo:
+            status = "covered"
+        elif ignored:
+            status = "local-only"      # 只靠 .git/info/exclude 或全域設定排除：別人 clone 下來不受保護
+        else:
+            status = "missing"
+        item = {"line": line, "probe": probe, "why": why, "status": status,
+                "matched_by": f"{source}:{pat}" if pat else None}
+        if status == "accepted":
+            item["accepted"] = ok[line]
+            info["accepted"].append(line)
+        elif status in ("missing", "local-only"):
+            info["missing"].append(line)
+            info["suggested_lines"].append(line)
+        info["rules"].append(item)
+        if status != "accepted":
+            paths = _tracked_matching(target, line)
+            if paths:
+                info["tracked"].append({"line": line, "count": len(paths), "paths": paths[:50]})
+    return info
+
+
+def print_ignore_check(info):
+    print(f"目標：{info['target']}")
+    if not info["git"]:
+        print("不是 git 專案：沒有 .gitignore 可檢查，略過（不影響其他功能）。")
+        return
+    labels = {"covered": "已排除", "missing": "缺", "local-only": "只在這台電腦排除", "accepted": "已決定不排除"}
+    print("| 條目 | 狀態 | 這是什麼 |")
+    print("|---|---|---|")
+    for r in info["rules"]:
+        extra = ""
+        if r["status"] == "local-only":
+            extra = f"（排除設定在 {r['matched_by'].rsplit(':', 1)[0]}，別人 clone 下來不受保護）"
+        elif r["status"] == "accepted":
+            extra = f"（{r['accepted'].get('date') or '?'}：{r['accepted'].get('reason') or '未寫理由'}）"
+        print(f"| `{r['line']}` | {labels[r['status']]}{extra} | {r['why']} |")
+    n = len(info["missing"])
+    print()
+    if n:
+        print(f"缺 {n} 條。要不要補由你決定（這只是提醒，不擋任何流程）。要補的話，.gitignore 加這幾行：")
+        for line in info["suggested_lines"]:
+            print(f"  {line}")
+        print("這些條目在本專案如果是正常資料（例如 *.jsonl 是題庫），在 .ai-review/config.md 的 ```ignore-ok 區塊記一行「條目 | 日期 | 理由」，之後不再列為缺漏。")
+    else:
+        print("標準機密清單都已排除（或已決定不排除）。")
+    if info["tracked"]:
+        print("\n⚠️ 已經被 git 追蹤、但符合清單的檔（補 .gitignore 對它們沒用，要另外處理，例如先確認內容再 git rm --cached）：")
+        for t in info["tracked"]:
+            more = f"（共 {t['count']} 個，只列前 50）" if t["count"] > len(t["paths"]) else ""
+            print(f"  `{t['line']}`{more}：")
+            for p in t["paths"]:
+                print(f"    {p}")
+    print("\n（唯讀檢查：沒有修改任何檔案。）")
+
+
+# ---------------------------------------------------------------- 第 6 節未驗證事項（G11，未發版）
+SEP_CELL_RE = re.compile(r"^:?-{3,}:?$")
+
+
+def unverified_items(target):
+    """讀 config.md 第 6 節的表。新格式有「狀態」欄（未解／已解 YYYY-MM-DD）；舊格式沒有，全部算「未標狀態」。
+    回傳 {"total","open","resolved","no_status","has_status_column"}；沒有 config 或沒有表回 None。只讀。"""
+    cfg = Path(target) / ".ai-review" / "config.md"
+    if not cfg.exists():
+        return None
+    m = re.search(r"^## 6\.[^\n]*\n(.*?)(?=^## |\Z)", norm_nl(read_text(cfg)), re.M | re.S)
+    if not m:
+        return None
+    header, rows = None, []
+    for line in m.group(1).splitlines():
+        s = line.strip()
+        if header is None:
+            if s.startswith("|") and "事項" in s:
+                header = [c.strip() for c in s.strip("|").split("|")]
+            continue
+        if not s.startswith("|"):
+            break
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if all(SEP_CELL_RE.match(c) for c in cells if c) or not any(cells):
+            continue
+        rows.append(cells)
+    if header is None:
+        return None
+    si = header.index("狀態") if "狀態" in header else None
+    res = {"total": len(rows), "open": 0, "resolved": 0, "no_status": 0, "has_status_column": si is not None}
+    for r in rows:
+        if si is None:
+            res["no_status"] += 1
+        elif si < len(r) and "已解" in r[si]:
+            res["resolved"] += 1
+        else:
+            res["open"] += 1
+    return res
+
+
+# ---------------------------------------------------------------- doctor：裝完還缺什麼（G10，未發版，唯讀）
+LOGIN_STATUS_RE = re.compile(r"^Commands:\s*\n(?:[ \t]+\S.*\n)*?[ \t]+status\b", re.M)
+
+
+def codex_login_state(codex, target):
+    """先讀 `codex login --help` 確認有 status 子指令才跑 `codex login status`（只查、不觸發登入）。
+    回傳 (True/False/None, 白話)。不印 status 的輸出（可能含帳號）。"""
+    rc, out, err = run([codex, "login", "--help"], cwd=target, input_text=b"", timeout=30)
+    if rc != 0 or not LOGIN_STATUS_RE.search(norm_nl(out)):
+        return None, "這版 codex 沒有查登入狀態的指令，請自己確認已登入（終端機打 codex 看會不會要你登入）"
+    rc, _, _ = run([codex, "login", "status"], cwd=target, input_text=b"", timeout=30)
+    if rc == 0:
+        return True, "已登入（codex login status）"
+    if rc == -1:
+        return None, "查登入狀態逾時，請自己確認已登入"
+    return False, "未登入：在終端機執行 codex login 登入後再送審"
+
+
+def find_tool(name, target):
+    p = shutil.which(name)
+    if p:
+        return p
+    for d in (Path(target) / ".venv" / "Scripts", Path(target) / ".venv" / "bin"):
+        q = shutil.which(name, path=str(d))
+        if q:
+            return q
+    return None
+
+
+def doctor(target, codex_name=None):
+    target = Path(target)
+    items = []
+
+    def add(key, label, ok, detail):
+        items.append({"key": key, "label": label, "ok": ok, "detail": detail})
+
+    git = shutil.which("git")
+    add("git", "git", bool(git), git or "找不到 git：指紋與快照會退回較弱的檔案雜湊")
+    codex = shutil.which(codex_name or "codex")
+    add("codex", "Codex 指令", bool(codex),
+        codex or "找不到 codex（PATH 上沒有）：裝 Codex 後才能背景送審；退路是手動開 Codex 打 $independent-review")
+    if codex:
+        ok, msg = codex_login_state(codex, target)
+        add("codex_login", "Codex 登入", ok, msg)
+        t, why = probe_mcp_server(codex, NODE_REPL_SERVER, target, os.environ.copy())
+        add("node_repl", "Codex 的 node_repl", True if t else None,
+            "已設定：送審時 kit 會把環境變數帶給它" if t else f"{why}：Codex 用 shell 工具跑命令，kit 不補 node_repl 設定（正常）")
+    else:
+        add("codex_login", "Codex 登入", None, "沒有 codex，略過")
+        add("node_repl", "Codex 的 node_repl", None, "沒有 codex，略過")
+    gl = find_tool("gitleaks", target)
+    add("gitleaks", "gitleaks（秘密掃描）", bool(gl),
+        gl or "沒裝：秘密掃描跑不了（checks 會記 skipped）；要裝請用使用者層安裝（照 gitleaks 官方說明）")
+    pa = find_tool("pip-audit", target)
+    add("pip_audit", "pip-audit（Python 依賴漏洞）", bool(pa) if pa else None,
+        pa or "沒找到（PATH 與專案 .venv）：Python 專案才需要；不是 Python 專案可忽略")
+    py, alias = real_python()
+    add("python", "送審用的 Python", not alias,
+        f"{py}" + ("（⚠️ 這是應用程式別名，Codex 沙箱可能啟動不了；改用實體安裝的 Python 執行 kit.py）" if alias else ""))
+    proj = None
+    if (target / ".ai-review").is_dir():
+        init, reason = config_initialized(target)
+        proj = {"installed": manifest_path(target).exists(), "kit_version": kit_version_of(target),
+                "initialized": init, "init_reason": reason, "unverified": unverified_items(target)}
+    return {"target": str(target), "items": items, "project": proj, "note": "唯讀檢查：沒有修改任何檔案、沒有觸發登入。"}
+
+
+def print_doctor(info):
+    mark = {True: "✓", False: "✗", None: "？"}
+    print(f"目標：{info['target']}")
+    print("| 項目 | 狀態 | 說明 |")
+    print("|---|---|---|")
+    for it in info["items"]:
+        print(f"| {it['label']} | {mark[it['ok']]} | {it['detail']} |")
+    p = info.get("project")
+    if p:
+        print(f"\n專案：套件 {p.get('kit_version') or '?'}；初始化：{'已完成' if p['initialized'] else '未完成（' + p['init_reason'] + '）'}")
+        u = p.get("unverified")
+        if u:
+            if u["has_status_column"]:
+                print(f"config.md 第 6 節未驗證事項：未解 {u['open']} 項、已解 {u['resolved']} 項（共 {u['total']}）")
+            else:
+                print(f"config.md 第 6 節未驗證事項：共 {u['total']} 項（舊格式沒有「狀態」欄，分不出已解未解；/safety-setup --refresh 會補）")
+    else:
+        print("\n專案：還沒安裝 ai-review-kit（沒有 .ai-review/）")
+    missing = [it["label"] for it in info["items"] if it["ok"] is False]
+    print("\n" + ("要補的：" + "、".join(missing) if missing else "沒有缺的必要項目。") + "（✗＝缺、？＝請自己確認或視專案而定；只提醒，不擋流程）")
+    print(info["note"])
+
+
+def do_doctor(args):
+    target = resolve_target(args)
+    if not target.is_dir():
+        print(f"找不到資料夾：{target}", file=sys.stderr)
+        return 1
+    info = doctor(target, getattr(args, "codex", None))
+    if getattr(args, "json", False):
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+    else:
+        print_doctor(info)
+    return 0
+
+
+def do_ignore_check(args):
+    target = resolve_target(args)
+    if not target.is_dir():
+        print(f"找不到資料夾：{target}", file=sys.stderr)
+        return 1
+    try:
+        info = ignore_check(target)
+    except RuntimeError as e:
+        print(f"ignore-check 執行失敗：{e}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+    else:
+        print_ignore_check(info)
+    return 0
+
+
 # ---------------------------------------------------------------- main
 def build_parser():
     p = argparse.ArgumentParser(prog="kit.py", description="ai-review-kit 工具")
@@ -1714,6 +2119,7 @@ def build_parser():
     s = sub.add_parser("checks", help="列出／執行 config.md 的檢查命令"); common(s)
     s.add_argument("--run", action="store_true"); s.add_argument("--handoff"); s.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     s = sub.add_parser("state", help="推導並寫入 state.json"); common(s); s.add_argument("--json", action="store_true")
+    s.add_argument("--no-write", action="store_true", help="只推導、不寫 state.json 與任何檔（配 --json 給外部程式讀）")
     s = sub.add_parser("verify", help="核對目前指紋與交接目標"); common(s); s.add_argument("--handoff")
     s = sub.add_parser("gate", help="合併／部署前關卡"); common(s)
     s = sub.add_parser("new-id", help="產生報告編號"); common(s); s.add_argument("prefix", choices=["H", "R", "F"])
@@ -1729,6 +2135,10 @@ def build_parser():
     s = sub.add_parser("hook", help="hook 進入點"); common(s); s.add_argument("event", choices=["session-start", "stop"]); s.add_argument("--agent", default="claude")
     s = sub.add_parser("pack", help="打離線 zip"); s.add_argument("--out"); s.add_argument("--source")
     s = sub.add_parser("check-update", help="檢查線上版本（選用，不自動更新）"); common(s); s.add_argument("--url")
+    s = sub.add_parser("ignore-check", help="唯讀檢查 .gitignore 有沒有排除金鑰、憑證、AI 逐字稿與記憶（只提醒，不改檔）")
+    common(s); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("doctor", help="唯讀列出送審前還缺什麼（Codex、登入、node_repl、gitleaks、pip-audit、Python）")
+    common(s); s.add_argument("--json", action="store_true"); s.add_argument("--codex", help="codex 執行檔（預設 PATH 上的 codex）")
     s = sub.add_parser("version", help="印出版本")
     return p
 
@@ -1774,6 +2184,10 @@ def main(argv=None):
         return do_pack(args)
     if args.cmd == "check-update":
         return do_check_update(args)
+    if args.cmd == "ignore-check":
+        return do_ignore_check(args)
+    if args.cmd == "doctor":
+        return do_doctor(args)
     p.print_help()
     return 0
 
