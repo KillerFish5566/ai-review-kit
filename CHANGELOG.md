@@ -3,7 +3,7 @@
 版本規則：patch＝修 bug 不改行為；minor＝加功能且舊專案資料相容；major＝專案資料需轉換或使用方式改變。
 每次發版：改 `VERSION`、在這裡加一段、`kit.py pack` 重打離線包。
 
-## 未發版
+## 0.4.1 — 2026-10-11
 
 修正：`ignore-check` 單一探針漏判（Codex 審查 R-20261011-1654-1，medium）。`.gitignore` 只寫 `credentials.*` 時，`credentials*` 會被判成「已排除」，但 `credentials-prod.json` 其實沒被排除——因為每條只用一個代表路徑（`credentials.json`）問 git。舊專案資料相容。
 
