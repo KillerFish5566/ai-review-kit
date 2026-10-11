@@ -3,6 +3,16 @@
 版本規則：patch＝修 bug 不改行為；minor＝加功能且舊專案資料相容；major＝專案資料需轉換或使用方式改變。
 每次發版：改 `VERSION`、在這裡加一段、`kit.py pack` 重打離線包。
 
+## 未發版
+
+修正：`ignore-check` 單一探針漏判（Codex 審查 R-20261011-1654-1，medium）。`.gitignore` 只寫 `credentials.*` 時，`credentials*` 會被判成「已排除」，但 `credentials-prod.json` 其實沒被排除——因為每條只用一個代表路徑（`credentials.json`）問 git。舊專案資料相容。
+
+- 每條標準條目改用多個代表路徑：規則字面最典型的檔、萬用字元展開的其他變體、放在子資料夾的同名檔（抓只寫在根目錄的錨定寫法 `/memory/`）。例：`credentials*` → `credentials`、`credentials.json`、`credentials-prod.json`、`credentials_backup.yml`、`sub/credentials.txt`。每個代表路徑都會被標準那一行本身排除，照建議補上後一定判「已排除」。仍然只交給 git 判斷（一次 `check-ignore --no-index --stdin`），不在磁碟建假檔。
+- 判定：全部被專案 `.gitignore` 排除 → `covered`；全部沒排除 → `missing`；有的排除、有的完全沒排除 → 新狀態 **`partial`**（白話「只排除了一部分」，舉出沒排除的例子），和 `missing` 一樣算進 `missing` 與 `suggested_lines`（建議補的仍是標準那一行）；全部都有排除、但其中有只靠本機設定（`.git/info/exclude`、全域）→ `local-only`；`accepted` 照舊。
+- `--json` 每條多 `probes`（每個代表路徑的 `path`、`ignored`、`in_repo`、`matched_by`）、`uncovered_probes`、`local_only_probes`；舊欄位 `probe`（第一個代表路徑）、`matched_by`（第一個有符合的規則）保留。
+- 行為變化：以前判 `missing` 的條目，現在可能判 `partial`（例如 `*.jsonl` 加了 `!session.jsonl`）；以前判 `covered` 的，現在可能判 `partial`（例如只寫 `credentials.*`、或錨定寫法 `/memory/`）。`/safety-setup` 對 `partial` 的寫法同 `missing`，事項後面加沒排除的例子。
+- 測試 161 → 169 項（T28：只寫 `credentials.*` 判 partial 並列出 `credentials-prod.json`、寫 `credentials*` 判 covered、錨定 `/memory/` 判 partial、`credentials*`＋`!credentials-prod.json` 判 partial、`--json` 新欄位與舊欄位相容、白話輸出舉例）；T21 的否定規則題期望值由 missing 改為 partial（理由同上）。
+
 ## 0.4.0 — 2026-10-11
 
 新功能：`.gitignore` 機密清單檢查（10-11 推送前連續三個倉庫的推送檢查表都卡在「.gitignore 沒排除金鑰、憑證、對話紀錄、記憶」，每次人工補）。只提醒、不改使用者專案的 `.gitignore`；`install` 也不塞清單（那是使用者專案的版控設定，超出審查套件範圍）。舊專案資料相容。

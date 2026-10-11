@@ -591,8 +591,11 @@ def main():
     check("T21 部分缺：已寫的算已排除、其餘列缺",
           rc == 0 and st13.get(".env") == "covered" and st13.get("*.pem") == "covered"
           and st13.get(".env.*") == "missing" and st13.get("memory/") == "missing", json.dumps(st13, ensure_ascii=False))
-    check("T21 否定規則（!session.jsonl）讓 *.jsonl 仍算缺（判斷交給 git）", st13.get("*.jsonl") == "missing",
-          json.dumps(st13, ensure_ascii=False))
+    # T-0054 起每條有多個代表路徑：!session.jsonl 讓 session.jsonl、logs/session.jsonl 沒被排除，但 a/b/history.jsonl 仍被排除 → partial（原本只有一個探針，判 missing）
+    jl = next((r for r in info.get("rules", []) if r["line"] == "*.jsonl"), {})
+    check("T21 否定規則（!session.jsonl）讓 *.jsonl 只排除一部分（判斷交給 git）",
+          st13.get("*.jsonl") == "partial" and set(jl.get("uncovered_probes", [])) == {"session.jsonl", "logs/session.jsonl"}
+          and "*.jsonl" in info.get("missing", []), json.dumps(jl, ensure_ascii=False)[:400])
     check("T21 只在 .git/info/exclude 排除 → 只在本機排除，也列進要補的行",
           st13.get("*.key") == "local-only" and "*.key" in info.get("missing", []) and "*.key" in info.get("suggested_lines", []),
           json.dumps(st13, ensure_ascii=False))
@@ -645,6 +648,55 @@ def main():
     check("T21 --json 欄位齊全、每條都有白話說明", keys_ok and rule_ok and len(info.get("rules", [])) == 15, json.dumps(info, ensure_ascii=False)[:400])
     rc, out, err = ic(root / "no-such-dir-t21")
     check("T21 指令本身失敗（資料夾不存在）才非 0", rc != 0 and "找不到資料夾" in err, out + err)
+
+    # ---------------- T28 單一探針漏判的回歸（T-0054，Codex 審查 R-20261011-1654-1）
+    def rule_of(info, line):
+        return next((r for r in info.get("rules", []) if r["line"] == line), {})
+
+    def std_with(*repl, extra=""):
+        lines = list(std)
+        for old, new in repl:
+            lines[lines.index(old)] = new
+        return "\n".join(lines) + "\n" + extra
+
+    p22 = new_git_project(root, "p22-probe-credentials-dot")
+    write(p22 / ".gitignore", std_with(("credentials*", "credentials.*")))
+    rc, info, err = icj(p22)
+    cr = rule_of(info, "credentials*")
+    check("T28 只寫 credentials.* → credentials* 判 partial，列進 missing 與 suggested_lines",
+          rc == 0 and cr.get("status") == "partial" and "credentials*" in info.get("missing", [])
+          and "credentials*" in info.get("suggested_lines", []), json.dumps(cr, ensure_ascii=False)[:500])
+    check("T28 partial 的 uncovered_probes 含 credentials-prod.json 與無副檔名的 credentials，已排除的 credentials.json 不在內",
+          {"credentials-prod.json", "credentials"} <= set(cr.get("uncovered_probes", []))
+          and "credentials.json" not in cr.get("uncovered_probes", []), json.dumps(cr.get("uncovered_probes"), ensure_ascii=False))
+    check("T28 --json 每條有 probes（ignored／matched_by）、保留舊欄位 probe＝第一個代表路徑",
+          all(set(x) >= {"path", "ignored", "matched_by"} for x in cr.get("probes", [])) and len(cr.get("probes", [])) >= 3
+          and cr.get("probe") == cr["probes"][0]["path"], json.dumps(cr, ensure_ascii=False)[:500])
+    check("T28 其他 14 條仍判已排除（只動了一行）", sum(1 for r in info.get("rules", []) if r["status"] == "covered") == 14,
+          json.dumps(status_of(info), ensure_ascii=False))
+    rc, out, err = ic(p22)
+    check("T28 白話輸出寫「只排除了一部分」並舉出沒排除的例子", rc == 0 and "只排除了一部分" in out and "credentials-prod.json" in out,
+          out[-600:])
+    p23 = new_git_project(root, "p23-probe-credentials-star")
+    write(p23 / ".gitignore", std_with())
+    rc, info, err = icj(p23)
+    check("T28 寫 credentials* → covered、沒有未排除的代表路徑",
+          rule_of(info, "credentials*").get("status") == "covered" and rule_of(info, "credentials*").get("uncovered_probes") == [],
+          json.dumps(rule_of(info, "credentials*"), ensure_ascii=False)[:400])
+    p24 = new_git_project(root, "p24-probe-anchored")
+    write(p24 / ".gitignore", std_with(("memory/", "/memory/")))
+    rc, info, err = icj(p24)
+    mr = rule_of(info, "memory/")
+    check("T28 錨定寫法 /memory/ → partial，沒排除的是子資料夾那個",
+          mr.get("status") == "partial" and mr.get("uncovered_probes") == ["sub/memory/notes.md"] and "memory/" in info.get("missing", []),
+          json.dumps(mr, ensure_ascii=False)[:400])
+    p25 = new_git_project(root, "p25-probe-negation")
+    write(p25 / ".gitignore", std_with(extra="!credentials-prod.json\n"))
+    rc, info, err = icj(p25)
+    nr = rule_of(info, "credentials*")
+    check("T28 credentials* 加否定規則 !credentials-prod.json → partial，只有那一個沒排除",
+          nr.get("status") == "partial" and nr.get("uncovered_probes") == ["credentials-prod.json"],
+          json.dumps(nr, ensure_ascii=False)[:400])
 
     # ---------------- T22 「已初始化」要 meta 有填＋第 4 節至少一條命令（G7，未發版）
     p16 = new_git_project(root, "p16-init")

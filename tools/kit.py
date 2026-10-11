@@ -1784,26 +1784,30 @@ def do_check_update(args):
 
 # ---------------------------------------------------------------- ignore-check（.gitignore 機密清單檢查，唯讀）
 # 標準清單以套件自己的 .gitignore（防手滑、機密與金鑰、AI 工具的逐字稿與記憶）為準。
-# 每條：(建議寫進 .gitignore 的那一行, 代表性的假路徑, 白話說明)。
-# 判斷全交給 git（check-ignore --no-index 對假路徑、ls-files -ci --exclude 找已追蹤檔），不自己解析 gitignore 語法。
+# 每條：(建議寫進 .gitignore 的那一行, [代表性的假路徑…], 白話說明)。
+# 代表路徑要多個（T-0054，R-20261011-1654-1：只用一個探針時，寫 credentials.* 也會把 credentials* 判成已排除）：
+#   規則字面最典型的檔、萬用字元展開的其他變體、放在子資料夾的同名檔（抓只寫在根目錄的錨定寫法 /xxx）。
+#   每個代表路徑都要被「標準那一行」本身排除，這樣照建議補上之後一定判 covered。
+# 判斷全交給 git（check-ignore --no-index 對假路徑、ls-files -ci --exclude 找已追蹤檔），不自己解析 gitignore 語法，不在磁碟建假檔。
 # .claude/ 整個排除會把套件裝的 .claude/skills/、.claude/settings.json 一起擋掉（那些要進版控），所以只要求 .claude/projects/。
 SECRET_IGNORE_RULES = [
-    (".env", ".env", "環境變數檔，常放 API 金鑰與密碼"),
-    (".env.*", ".env.local", "各環境的環境變數檔（.env.local、.env.production…），內容同上"),
-    ("*.local.*", "config.local.json", "本機專用設定（命名慣例 *.local.*），常含個人路徑或金鑰"),
-    ("credentials*", "credentials.json", "雲端服務或程式的登入憑證檔"),
-    ("secrets.*", "secrets.yaml", "秘密設定檔（命名就是放秘密的）"),
-    (".claude/settings.local.json", ".claude/settings.local.json", "Claude Code 的個人本機設定，含個人權限與路徑"),
-    ("*.pem", "server.pem", "憑證或私鑰檔（PEM 格式）"),
-    ("*.key", "private.key", "私鑰檔"),
-    ("*.pfx", "cert.pfx", "含私鑰的憑證包（Windows 常見）"),
-    ("*.p12", "cert.p12", "含私鑰的憑證包（PKCS#12）"),
-    ("id_rsa*", "id_rsa", "SSH 私鑰（RSA）"),
-    ("id_ed25519*", "id_ed25519", "SSH 私鑰（Ed25519）"),
-    (".claude/projects/", ".claude/projects/demo/notes.md",
+    (".env", [".env", "sub/.env"], "環境變數檔，常放 API 金鑰與密碼"),
+    (".env.*", [".env.local", ".env.production", "sub/.env.local"], "各環境的環境變數檔（.env.local、.env.production…），內容同上"),
+    ("*.local.*", ["config.local.json", "settings.local.yaml", "sub/app.local.toml"], "本機專用設定（命名慣例 *.local.*），常含個人路徑或金鑰"),
+    ("credentials*", ["credentials", "credentials.json", "credentials-prod.json", "credentials_backup.yml", "sub/credentials.txt"],
+     "雲端服務或程式的登入憑證檔"),
+    ("secrets.*", ["secrets.yaml", "secrets.json", "sub/secrets.env"], "秘密設定檔（命名就是放秘密的）"),
+    (".claude/settings.local.json", [".claude/settings.local.json"], "Claude Code 的個人本機設定，含個人權限與路徑"),
+    ("*.pem", ["server.pem", "sub/certs/client.pem"], "憑證或私鑰檔（PEM 格式）"),
+    ("*.key", ["private.key", "sub/tls.key"], "私鑰檔"),
+    ("*.pfx", ["cert.pfx", "sub/signing.pfx"], "含私鑰的憑證包（Windows 常見）"),
+    ("*.p12", ["cert.p12", "sub/keystore.p12"], "含私鑰的憑證包（PKCS#12）"),
+    ("id_rsa*", ["id_rsa", "id_rsa_work", "sub/id_rsa"], "SSH 私鑰（RSA）"),
+    ("id_ed25519*", ["id_ed25519", "id_ed25519_work", "sub/id_ed25519"], "SSH 私鑰（Ed25519）"),
+    (".claude/projects/", [".claude/projects/demo/notes.md", ".claude/projects/demo/sub/state.txt"],
      "Claude Code 的對話逐字稿與專案記憶；不要整個 .claude/ 排除（套件的 skills 與 settings.json 要進版控）"),
-    ("*.jsonl", "logs/session.jsonl", "AI 工具的對話逐字稿常用格式（每行一筆 JSON）"),
-    ("memory/", "memory/notes.md", "AI 工具的記憶資料夾，可能含個人偏好與內部資訊"),
+    ("*.jsonl", ["session.jsonl", "logs/session.jsonl", "a/b/history.jsonl"], "AI 工具的對話逐字稿常用格式（每行一筆 JSON）"),
+    ("memory/", ["memory/notes.md", "sub/memory/notes.md"], "AI 工具的記憶資料夾，可能含個人偏好與內部資訊"),
 ]
 IGNORE_OK_RE = re.compile(r"```ignore-ok[ \t]*\n(.*?)```", re.S)
 
@@ -1864,27 +1868,38 @@ def ignore_check(target):
     info["git"] = True
     info["gitignore_exists"] = (target / ".gitignore").exists()
     ok = parse_ignore_ok(target)
-    probes = _check_ignore_probes(target, [r[1] for r in SECRET_IGNORE_RULES])
-    for line, probe, why in SECRET_IGNORE_RULES:
-        ignored, source, pat = probes.get(probe, (False, "", ""))
-        src = source.replace("\\", "/")
-        # 專案裡的 .gitignore 會印相對路徑；.git/info/exclude 與全域 excludesFile（可能也叫 .gitignore）是本機設定
-        in_repo = (ignored and Path(src).name == ".gitignore" and not src.startswith((".git/", "/", "~"))
-                   and not re.match(r"^[A-Za-z]:", src))
+    probes = _check_ignore_probes(target, [p for r in SECRET_IGNORE_RULES for p in r[1]])
+    for line, plist, why in SECRET_IGNORE_RULES:
+        pres = []
+        for probe in plist:
+            ignored, source, pat = probes.get(probe, (False, "", ""))
+            src = source.replace("\\", "/")
+            # 專案裡的 .gitignore 會印相對路徑；.git/info/exclude 與全域 excludesFile（可能也叫 .gitignore）是本機設定
+            in_repo = (ignored and Path(src).name == ".gitignore" and not src.startswith((".git/", "/", "~"))
+                       and not re.match(r"^[A-Za-z]:", src))
+            pres.append({"path": probe, "ignored": ignored, "in_repo": bool(in_repo),
+                         "matched_by": f"{source}:{pat}" if pat else None})
+        uncovered = [x["path"] for x in pres if not x["ignored"]]
+        local = [x["path"] for x in pres if x["ignored"] and not x["in_repo"]]
+        # 判定（T-0054）：全部被專案 .gitignore 排除 → covered；全部沒排除 → missing；
+        # 有的排除、有的完全沒排除 → partial；全部都有排除、但其中有只靠本機設定（.git/info/exclude、全域）→ local-only
         if line in ok:
             status = "accepted"
-        elif in_repo:
-            status = "covered"
-        elif ignored:
+        elif len(uncovered) == len(pres):
+            status = "missing"
+        elif uncovered:
+            status = "partial"
+        elif local:
             status = "local-only"      # 只靠 .git/info/exclude 或全域設定排除：別人 clone 下來不受保護
         else:
-            status = "missing"
-        item = {"line": line, "probe": probe, "why": why, "status": status,
-                "matched_by": f"{source}:{pat}" if pat else None}
+            status = "covered"
+        first_match = next((x["matched_by"] for x in pres if x["matched_by"]), None)
+        item = {"line": line, "probe": plist[0], "why": why, "status": status, "matched_by": first_match,
+                "probes": pres, "uncovered_probes": uncovered, "local_only_probes": local}
         if status == "accepted":
             item["accepted"] = ok[line]
             info["accepted"].append(line)
-        elif status in ("missing", "local-only"):
+        elif status in ("missing", "partial", "local-only"):
             info["missing"].append(line)
             info["suggested_lines"].append(line)
         info["rules"].append(item)
@@ -1900,20 +1915,25 @@ def print_ignore_check(info):
     if not info["git"]:
         print("不是 git 專案：沒有 .gitignore 可檢查，略過（不影響其他功能）。")
         return
-    labels = {"covered": "已排除", "missing": "缺", "local-only": "只在這台電腦排除", "accepted": "已決定不排除"}
+    labels = {"covered": "已排除", "missing": "缺", "partial": "只排除了一部分", "local-only": "只在這台電腦排除",
+              "accepted": "已決定不排除"}
     print("| 條目 | 狀態 | 這是什麼 |")
     print("|---|---|---|")
     for r in info["rules"]:
         extra = ""
-        if r["status"] == "local-only":
-            extra = f"（排除設定在 {r['matched_by'].rsplit(':', 1)[0]}，別人 clone 下來不受保護）"
+        if r["status"] == "partial":
+            ex = "、".join(r["uncovered_probes"][:3]) + ("…" if len(r["uncovered_probes"]) > 3 else "")
+            extra = f"（像 {ex} 這種沒排除；補標準那一行就全部涵蓋）"
+        elif r["status"] == "local-only":
+            src = next((x["matched_by"] for x in r["probes"] if x["path"] in r["local_only_probes"]), r["matched_by"]) or ""
+            extra = f"（排除設定在 {src.rsplit(':', 1)[0]}，別人 clone 下來不受保護）"
         elif r["status"] == "accepted":
             extra = f"（{r['accepted'].get('date') or '?'}：{r['accepted'].get('reason') or '未寫理由'}）"
         print(f"| `{r['line']}` | {labels[r['status']]}{extra} | {r['why']} |")
     n = len(info["missing"])
     print()
     if n:
-        print(f"缺 {n} 條。要不要補由你決定（這只是提醒，不擋任何流程）。要補的話，.gitignore 加這幾行：")
+        print(f"缺 {n} 條（含只排除一部分的）。要不要補由你決定（這只是提醒，不擋任何流程）。要補的話，.gitignore 加這幾行：")
         for line in info["suggested_lines"]:
             print(f"  {line}")
         print("這些條目在本專案如果是正常資料（例如 *.jsonl 是題庫），在 .ai-review/config.md 的 ```ignore-ok 區塊記一行「條目 | 日期 | 理由」，之後不再列為缺漏。")

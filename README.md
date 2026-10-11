@@ -39,7 +39,7 @@ ai-review-kit/
 ├ claude/skills/   safety-setup、review-ready、review-fix（Claude Code Skills）
 ├ codex/skills/    independent-review（Codex Skill，裝到專案 .agents/skills/）
 ├ tools/kit.py     安裝／更新／狀態／還原／打包 ＋ 專案內的快照／檢查／狀態／關卡／hook
-├ tools/tests/     自動化驗證（暫存專案，161 個檢查點）
+├ tools/tests/     自動化驗證（暫存專案，169 個檢查點）
 └ docs/            codex-start.md（讓 Codex 接手）、daily-usage.md（日常）、offline-setup.md（帶到不能連 GitHub 的電腦）
 ```
 
@@ -73,7 +73,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 | `restore --yes` | 還原最近一次安裝／更新前的狀態（先列清單）；可逐次往前還原 |
 | `relink [--python "py -3"]` | 換電腦後重寫 hook 的直譯器、重建 `local.json` |
 | `codex-review [--detach] [--print]` | 在專案裡執行：用工作區沙箱啟動 Codex 審查最新交接，紀錄寫 `.ai-review/.cache/codex-<H>.log`，結束寫 `.done`；找不到 codex 時 exit 3 並提示手動退路。用 `-c` 把 `AI_REVIEW_PYTHON`、`SystemDrive` 等環境變數帶進沙箱（只對這次有效，不改 Codex 設定檔；`--print` 列出全部）；審完比對工作區，審查期間多出或被改的檔會警告並寫進 `.done`，不自動刪 |
-| `ignore-check [--json]` | 唯讀檢查 `.gitignore` 有沒有排除標準機密清單（`.env`、金鑰與憑證、`.claude/projects/` 對話逐字稿、`*.jsonl`、`memory/` 等 15 條），並列出已被 git 追蹤、但符合清單的檔（只列路徑、不印內容）。`/safety-setup` 盤點時會跑，缺的記進 `config.md` 第 6 節。只提醒、不是關卡，**不會改 `.gitignore`**；缺漏也 exit 0。本專案是正常資料的條目（例如題庫 `*.jsonl`）在 `config.md` 的 ```` ```ignore-ok ```` 區塊記「條目 \| 日期 \| 理由」，之後不再列為缺漏 |
+| `ignore-check [--json]` | 唯讀檢查 `.gitignore` 有沒有排除標準機密清單（`.env`、金鑰與憑證、`.claude/projects/` 對話逐字稿、`*.jsonl`、`memory/` 等 15 條），每條用多個代表路徑（典型檔名、萬用字元的其他變體、子資料夾裡的同名檔）交給 git 判斷，只排除一部分的列「只排除了一部分」並舉例；並列出已被 git 追蹤、但符合清單的檔（只列路徑、不印內容）。`/safety-setup` 盤點時會跑，缺的記進 `config.md` 第 6 節。只提醒、不是關卡，**不會改 `.gitignore`**；缺漏也 exit 0。本專案是正常資料的條目（例如題庫 `*.jsonl`）在 `config.md` 的 ```` ```ignore-ok ```` 區塊記「條目 \| 日期 \| 理由」，之後不再列為缺漏 |
 | `pack` | 打離線 zip 到 `dist/` |
 | `check-update --url <VERSION 檔網址>` | 只查版本號，不自動更新；沒網路就如實說「未檢查更新」 |
 
