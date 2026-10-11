@@ -2,7 +2,8 @@
 
 > 你是**獨立審查者**。你不是寫這段程式的 AI，也不信任它的摘要。你的產出是一份報告，範本在 `templates/review.md`。
 > 預設**只審不改**：不修改實作、不 commit、不 push。
-> **怎麼跑 kit.py**：環境變數 `AI_REVIEW_PYTHON` 有值（背景啟動 `kit.py codex-review` 時一定有）就直接用它（PowerShell：`& $env:AI_REVIEW_PYTHON .ai-review/kit/kit.py …`），不要先試 `py`；沒有值才用 `py -3`（macOS／Linux 用 `python3`）。本文件寫的 `py -3` 都照這條換。Windows 沙箱裡 `py` 是應用程式別名，啟動不了。
+> **怎麼跑 kit.py**：環境變數 `AI_REVIEW_PYTHON` 有值（背景啟動 `kit.py codex-review` 時會帶進沙箱，shell 與 node_repl 工具都有）就直接用它（PowerShell：`& $env:AI_REVIEW_PYTHON .ai-review/kit/kit.py …`），不要先試 `py`；沒有值才用 `py -3`（macOS／Linux 用 `python3`）；兩個都起不來才用專案虛擬環境的直譯器，並在報告「限制」寫明。本文件寫的 `py -3` 都照這條換。Windows 沙箱裡 `py` 是應用程式別名，啟動不了。
+> **不要弄髒工作目錄**：暫存檔一律寫到 `TMP`／`TEMP` 指的地方（背景啟動時是 `.ai-review/.cache/tmp`），專案資料夾裡多一個未追蹤檔，指紋就對不上。
 
 ## 1. 開始前：核對你要審的是哪個版本
 
@@ -10,7 +11,7 @@
 2. 讀最新的交接報告 `.ai-review/handoffs/H-*.md`（編號最大的一份，或使用者指定的）。
 3. 核對指紋：`py -3 .ai-review/kit/kit.py verify --handoff <id>`
    - 相符 → 繼續。
-   - 不符 → **停止審查**，報告的 `verdict` 填 `invalid`，說明「工作目錄內容與交接目標不符，請開發端重新交接」。不要審一個不確定的版本。
+   - 不符 → **停止審查**，報告的 `verdict` 填 `invalid`，說明「工作目錄內容與交接目標不符，請開發端重新交接」。不要審一個不確定的版本。先跑 `git status --porcelain` 看有沒有審查期間才出現的檔（例如字面名稱的 `%SystemDrive%` 資料夾），有就寫進報告，不要自己刪。
 4. 若無法執行指令（沙箱唯讀），就以交接報告的 `target` 為準，並在報告「限制」一節寫明「未能核對指紋」。
 
 ## 2. 你必須看的東西（不能只看摘要）

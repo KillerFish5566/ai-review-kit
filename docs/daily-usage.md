@@ -43,5 +43,6 @@ py -3 .ai-review/kit/kit.py relink
 - **hook 開頭沒出現**：hooks 是啟動時載入，改完設定要重開 Claude Code；`status` 看接線是否就位；Python 路徑不對就 `relink`。
 - **Codex 不認得 `$independent-review`**：確認在專案根目錄啟動、`.agents/skills/independent-review/SKILL.md` 存在；不行就貼 `codex-start.md` 那句話。
 - **背景審查沒有產生報告**：看 `.ai-review/.cache/codex-<H-編號>.log`（常見：額度不足、登入過期）。額度不足就在 `config.md` 第 6 節記下哪份交接尚未審，恢復後再跑 `py -3 .ai-review/kit/kit.py codex-review`。
+- **審查結束時出現「⚠️ 審查期間工作區有 N 個檔變了」**：Codex 審查期間專案裡多了或改了檔（例如字面名稱的 `%SystemDrive%\` 資料夾＝沙箱少了環境變數時 Windows 留下的快取），指紋可能因此對不上、審查判 invalid。先看清單上是什麼：是垃圾就清掉後 `codex-review --again`；是真的改動就重新 `/review-ready`。kit 不會自動刪任何檔。
 - **Codex 沙箱唯讀寫不了報告**（手動用 `--sandbox read-only` 時）：它會把報告印出來，你存到 `.ai-review/reviews/R-編號.md`，回 Claude Code 跑 `py -3 .ai-review/kit/kit.py state`。
 - **想看某次審的是哪個版本**：交接檔頭的 `snapshot_ref`，`git diff <base>..refs/ai-review/H-xxx`。

@@ -801,6 +801,12 @@ def is_git_root(target):
 def git_tree_fingerprint(target, persist=False):
     """persist=False：新物件寫進暫存物件庫（原物件庫只讀不寫），沙箱不准寫 .git 也能算（Codex 審查用）。
     persist=True：寫進專案的 .git，給 snapshot 接著 commit-tree 建快照參照。"""
+    return _git_scan(target, persist, want_list=False)
+
+
+def _git_scan(target, persist, want_list):
+    """指紋與工作區清單共用：暫存 index 收進「目前工作目錄、不含 .ai-review/、照 .gitignore」的全部檔。
+    want_list=False 回傳 tree 雜湊（指紋）；True 回傳 {相對路徑: blob 雜湊}（審後比對用）。"""
     with tempfile.TemporaryDirectory() as td:
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = str(Path(td) / "index")
@@ -817,23 +823,62 @@ def git_tree_fingerprint(target, persist=False):
         rc, _, err = run(["git", "add", "-A", "--", ".", ":(exclude).ai-review"], cwd=target, env=env)
         if rc != 0:
             raise RuntimeError("git add 失敗：" + err.strip())
+        if want_list:
+            rc, out, err = run(["git", "ls-files", "-s", "-z"], cwd=target, env=env)
+            if rc != 0:
+                raise RuntimeError("git ls-files 失敗：" + err.strip())
+            listing = {}
+            for rec in out.split("\0"):
+                if "\t" in rec:
+                    meta, path = rec.split("\t", 1)
+                    listing[path] = meta.split(" ")[1] if " " in meta else meta
+            return listing
         rc, out, err = run(["git", "write-tree"], cwd=target, env=env)
         if rc != 0:
             raise RuntimeError("git write-tree 失敗：" + err.strip())
         return out.strip()
 
 
-def file_fingerprint(target):
-    h = hashlib.sha256()
+def _file_hashes(target):
     for root, dirs, files in os.walk(target):
         dirs[:] = sorted(d for d in dirs if d not in EXCLUDE_DIRS)
         for f in sorted(files):
             p = Path(root) / f
             try:
-                h.update(rel(p, target).encode("utf-8") + b"\0" + sha256_file(p).encode() + b"\n")
+                yield rel(p, target), sha256_file(p)
             except Exception:
                 continue
+
+
+def file_fingerprint(target):
+    h = hashlib.sha256()
+    for rp, digest in _file_hashes(target):
+        h.update(rp.encode("utf-8") + b"\0" + digest.encode() + b"\n")
     return "sha256:" + h.hexdigest()[:40]
+
+
+def workspace_listing(target, is_git):
+    """指紋涵蓋的每個檔與內容雜湊（與指紋同一套收檔規則），codex-review 審前審後比對用（2026-10-11 新增）。"""
+    if is_git:
+        return _git_scan(target, False, want_list=True)
+    return dict(_file_hashes(target))
+
+
+LITERAL_ENV_DIR_RE = re.compile(r"^%[A-Za-z_][A-Za-z0-9_()]*%$")
+
+
+def literal_env_dirs(target):
+    """專案根目錄下名稱是字面「%變數%」的資料夾（環境變數沒展開的痕跡）。照 .gitignore 排除的也算，用來看沙箱環境修好沒。"""
+    try:
+        return sorted(p.name for p in Path(target).iterdir() if p.is_dir() and LITERAL_ENV_DIR_RE.match(p.name))
+    except OSError:
+        return []
+
+
+def workspace_changes(before, after):
+    b, a = set(before), set(after)
+    return {"added": sorted(a - b), "modified": sorted(p for p in a & b if before[p] != after[p]),
+            "removed": sorted(b - a)}
 
 
 def fingerprint(target, persist=False):
@@ -1199,9 +1244,85 @@ def real_python():
     return exe, alias
 
 
-def codex_review_cmd(codex, target, hid, is_git):
+# 審查沙箱裡的命令要拿得到的環境變數（2026-10-11 新增）。
+# 2026-10-11 vocab-rpg：Codex 的 shell 工具在沙箱起不來，改走 node_repl（Codex 桌面版裝的 MCP 伺服器）跑命令；
+# 它給模型程式碼的環境只放行 NODE_REPL_UNTRUSTED_ENV_ALLOWLIST 列的名稱 → 沒有 SystemDrive，Windows 元件把快取寫到
+# 專案根目錄字面名稱的「%SystemDrive%\」資料夾（指紋漂移、複查 invalid）；也沒有 AI_REVIEW_PYTHON。
+SHELL_ENV_NAMES_WIN = ("SYSTEMDRIVE", "SYSTEMROOT", "WINDIR", "PROGRAMDATA")
+# 只放行 Codex 官方 WINDOWS_CORE_ENV_VARS 裡的系統位置變數＋AI_REVIEW_PYTHON；不放任何帳號、金鑰類名稱。
+NODE_REPL_PASS_NAMES = ("AI_REVIEW_PYTHON", "SYSTEMDRIVE", "SYSTEMROOT", "WINDIR", "PROGRAMDATA",
+                        "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP")
+NODE_REPL_ENV_SET = ("AI_REVIEW_PYTHON", "SYSTEMDRIVE", "SYSTEMROOT", "PROGRAMDATA")   # 直接寫進伺服器 env（值短）
+NODE_REPL_SERVER = "node_repl"
+NODE_REPL_ALLOW_KEY = "NODE_REPL_UNTRUSTED_ENV_ALLOWLIST"
+
+
+def toml_str(s):
+    """-c 的值照 TOML 解析：用 TOML 基本字串（雙引號、反斜線跳脫）。"""
+    return json.dumps(str(s), ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
+def sandbox_env_values(env):
+    """要帶進沙箱的變數與值（取自即將傳給 codex 的環境）。"""
+    vals = {}
+    names = ("AI_REVIEW_PYTHON",) + (SHELL_ENV_NAMES_WIN if os.name == "nt" else ())
+    for k in names:
+        if env.get(k):
+            vals[k] = env[k]
+    if os.name == "nt" and "SYSTEMDRIVE" not in vals and env.get("SYSTEMROOT", "")[1:2] == ":":
+        vals["SYSTEMDRIVE"] = env["SYSTEMROOT"][:2]
+    return vals
+
+
+def probe_mcp_server(codex, name, target, env):
+    """用官方指令 `codex mcp get <name> --json` 讀已設定的 MCP 伺服器（只讀設定，不啟動任何東西）。
+    回傳 (transport, 原因)；沒設定、停用、不是 stdio → (None, 原因)。
+    沒設定的伺服器不能用 -c 補 env：Codex 會報 invalid transport 整個起不來（2026-10-11 實測 0.162.0）。"""
+    rc, out, err = run([codex, "mcp", "get", name, "--json"], cwd=target, env=env, timeout=60)
+    if rc != 0:
+        msg = (err.strip().splitlines() or [f"exit {rc}"])[-1]
+        return None, f"沒有設定（{msg[:120]}）"
+    try:
+        d = json.loads(out)
+    except Exception:
+        return None, "讀不懂 codex mcp get 的輸出"
+    t = d.get("transport") or {}
+    if d.get("enabled") is False:
+        return None, "已停用"
+    if t.get("type") != "stdio":
+        return None, f"不是 stdio 伺服器（{t.get('type')}）"
+    return t, None
+
+
+def sandbox_overrides(codex, target, env):
+    """回傳 (-c 參數清單, 說明行)。兩層：
+    ① shell 工具：官方 shell_environment_policy.set（Codex 設定檔文件）——即使使用者設了 inherit=core/none 也帶得到。
+    ② node_repl：官方 mcp_servers.<id>.env 把值交給伺服器；再把名稱加進它的 NODE_REPL_UNTRUSTED_ENV_ALLOWLIST
+       （這個名稱的作用取自本機 node_repl 執行檔內的程式碼，不是官方文件；原值保留在前面）。"""
+    vals = sandbox_env_values(env)
+    ov, notes = [], []
+    for k, v in vals.items():
+        ov.append(f"shell_environment_policy.set.{k}={toml_str(v)}")
+    t, why = probe_mcp_server(codex, NODE_REPL_SERVER, target, env)
+    if t is None:
+        notes.append(f"{NODE_REPL_SERVER}：{why}，不補設定")
+    else:
+        for k in NODE_REPL_ENV_SET:
+            if k in vals:
+                ov.append(f"mcp_servers.{NODE_REPL_SERVER}.env.{k}={toml_str(vals[k])}")
+        cur = str((t.get("env") or {}).get(NODE_REPL_ALLOW_KEY) or "")
+        names = [n.strip() for n in cur.split(",") if n.strip()]
+        for n in NODE_REPL_PASS_NAMES:
+            if (n in vals or env.get(n)) and n.upper() not in {x.upper() for x in names}:
+                names.append(n)
+        ov.append(f"mcp_servers.{NODE_REPL_SERVER}.env.{NODE_REPL_ALLOW_KEY}={toml_str(','.join(names))}")
+        notes.append(f"{NODE_REPL_SERVER}：已設定，補 env 並放行 {','.join(names)}")
+    return [x for o in ov for x in ("-c", o)], notes
+
+
+def codex_review_cmd(codex, target, hid, is_git, overrides=()):
     # 固定形狀：工作區可寫沙箱、不覆寫模型（照 Codex 設定檔）、永遠不加 --dangerously-bypass-approvals-and-sandbox
-    cmd = [codex, "exec", "-C", str(target), "-s", "workspace-write"]
+    cmd = [codex, "exec", *overrides, "-C", str(target), "-s", "workspace-write"]
     if not is_git:
         cmd.append("--skip-git-repo-check")
     cmd.append(f"$independent-review {hid}")
@@ -1258,13 +1379,22 @@ def do_codex_review(args):
         env[k] = str(tmp)
     env["AI_REVIEW_PYTHON"] = str(py)          # independent-review 技能在 py 無法啟動時改用它
     env["PATH"] = str(py.parent) + os.pathsep + env.get("PATH", "")
-    cmd = codex_review_cmd(codex, target, hid, st["git"])
+    if args.no_sandbox_env:
+        overrides, ov_notes = [], ["--no-sandbox-env：不帶沙箱環境變數設定（0.2.1 行為）"]
+    else:
+        overrides, ov_notes = sandbox_overrides(codex, target, env)
+    cmd = codex_review_cmd(codex, target, hid, st["git"], overrides)
 
     if args.print_only:
         print("將執行：" + " ".join(shlex.quote(c) for c in cmd))
         print(f"工作目錄：{target}")
         print(f"TMP／TEMP：{tmp}")
         print(f"AI_REVIEW_PYTHON：{py}" + ("（⚠️ 這是應用程式別名，沙箱可能啟動不了）" if alias else ""))
+        print("帶進沙箱的設定（-c，只對這次審查有效，不改 Codex 設定檔）：" + ("" if overrides else "無"))
+        for o in overrides[1::2]:
+            print(f"  -c {o}")
+        for n in ov_notes:
+            print(f"  {n}")
         print(f"紀錄：{rel(log, target)}  結束標記：{rel(done, target)}")
         return 0
 
@@ -1276,6 +1406,8 @@ def do_codex_review(args):
             child += ["--codex", args.codex]
         if args.again:
             child.append("--again")
+        if args.no_sandbox_env:
+            child.append("--no-sandbox-env")
         kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(target)}
         if os.name == "nt":
             kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -1289,9 +1421,16 @@ def do_codex_review(args):
     if alias:
         print(f"⚠️ 目前的 Python 是應用程式別名（{py}），Codex 沙箱裡的指紋核對可能失敗。")
     done.unlink(missing_ok=True)
+    try:
+        before = workspace_listing(target, st["git"])     # 審前清單：審後比對，抓審查期間多出來或被改的檔（2026-10-11 新增）
+    except Exception as e:
+        before, list_err = None, str(e)
+    env_dirs_before = literal_env_dirs(target)
     started = now_str()
     write_text(running, json.dumps({"handoff": hid, "pid": os.getpid(), "started": started}, ensure_ascii=False) + "\n")
     print(f"Codex 審查交接 {hid} 開始（{started}），紀錄寫到 {rel(log, target)}")
+    for n in ov_notes:
+        print(f"沙箱設定：{n}")
     try:
         with open(log, "wb") as lf:
             proc = subprocess.Popen(cmd, cwd=str(target), env=env, stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT)
@@ -1305,9 +1444,45 @@ def do_codex_review(args):
         running.unlink(missing_ok=True)
     out = derive_and_write_state(target, quiet=True)
     r = out.get("review") if (out.get("handoff") or {}).get("id") == hid else None
-    dump_json(done, {"handoff": hid, "exit": code, "started": started, "finished": now_str(),
-                     "review": r.get("id") if r else None, "verdict": r.get("verdict") if r else None})
+    info = {"handoff": hid, "exit": code, "started": started, "finished": now_str(),
+            "review": r.get("id") if r else None, "verdict": r.get("verdict") if r else None,
+            "sandbox_env": ov_notes}
+    warn = []
+    if before is None:
+        warn.append(f"審前工作區清單沒取到（{list_err[:200]}），沒辦法比對審查期間有沒有多出檔案。")
+    else:
+        try:
+            ch = workspace_changes(before, workspace_listing(target, st["git"]))
+        except Exception as e:
+            ch = None
+            warn.append(f"審後工作區清單沒取到（{str(e)[:200]}），沒辦法比對。")
+        if ch and any(ch.values()):
+            info["workspace_changes"] = {k: v[:200] for k, v in ch.items()}
+            n = sum(len(v) for v in ch.values())
+            warn.append(f"⚠️ 審查期間工作區有 {n} 個檔變了（不含 .ai-review/，照 .gitignore）：指紋可能漂移，先看是什麼再決定"
+                        "（例如審查沙箱留下的字面「%SystemDrive%\\」資料夾）。kit 不會自動刪任何檔。")
+            for label, key in (("新增", "added"), ("修改", "modified"), ("刪除", "removed")):
+                for p in ch[key][:20]:
+                    warn.append(f"  {label}：{p}")
+                if len(ch[key]) > 20:
+                    warn.append(f"  …{label}共 {len(ch[key])} 個，完整清單見 {rel(done, target)}")
+    new_env_dirs = [d for d in literal_env_dirs(target) if d not in env_dirs_before]
+    if new_env_dirs:
+        info["literal_env_dirs"] = new_env_dirs
+        warn.append(f"⚠️ 審查期間專案根目錄出現字面名稱的資料夾：{'、'.join(new_env_dirs)}——沙箱裡少了對應的環境變數"
+                    "（被 .gitignore 排除時不影響指紋，但表示環境變數沒帶進去）。kit 不會自動刪。")
+    if out.get("fresh") is False:
+        info["fingerprint_drift"] = True
+        warn.append(f"⚠️ 目前指紋 {short(out.get('current_fingerprint'))} 與交接目標 {short((out.get('handoff') or {}).get('target'))} 不符，"
+                    "狀態已回到「尚未準備」；先看上面列的檔是什麼，再決定清掉後 `codex-review --again`，或重新 /review-ready。")
+    if warn:
+        info["warnings"] = warn
+        with open(log, "ab") as lf:
+            lf.write(("\n[ai-review-kit 審後檢查]\n" + "\n".join(warn) + "\n").encode("utf-8"))
+    dump_json(done, info)
     print(f"Codex 結束（exit {code}）。")
+    for w in warn:
+        print(w)
     if r:
         print(f"審查報告：{r.get('id')}  結論 {r.get('verdict')}")
         print_state(out)
@@ -1548,6 +1723,8 @@ def build_parser():
     s.add_argument("--print", action="store_true", dest="print_only", help="只印出將執行的命令與環境，不啟動")
     s.add_argument("--again", action="store_true", help="已有審查或看起來仍在執行時，仍要再跑一次")
     s.add_argument("--timeout", type=int, default=60, help="逾時分鐘數（預設 60）")
+    s.add_argument("--no-sandbox-env", action="store_true",
+                   help="不帶沙箱環境變數設定（-c shell_environment_policy／node_repl）；除錯用，回到 0.2.1 行為")
     s.add_argument("--codex", help="codex 執行檔（預設 PATH 上的 codex）")
     s = sub.add_parser("hook", help="hook 進入點"); common(s); s.add_argument("event", choices=["session-start", "stop"]); s.add_argument("--agent", default="claude")
     s = sub.add_parser("pack", help="打離線 zip"); s.add_argument("--out"); s.add_argument("--source")

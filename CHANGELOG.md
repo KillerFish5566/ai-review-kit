@@ -3,6 +3,21 @@
 版本規則：patch＝修 bug 不改行為；minor＝加功能且舊專案資料相容；major＝專案資料需轉換或使用方式改變。
 每次發版：改 `VERSION`、在這裡加一段、`kit.py pack` 重打離線包。
 
+## 0.3.0 — 2026-10-11
+
+修正：Codex 審查時沙箱裡的命令拿不到 `SystemDrive`、`AI_REVIEW_PYTHON` 等環境變數（2026-10-11 vocab-rpg 與秘書兩個專案都發生）。Windows 元件因此把快取寫到專案根目錄一個字面名稱的 `%SystemDrive%\` 資料夾（約 1 MB），指紋漂移、複查判 invalid（vocab-rpg R-20261011-1136）；`py` 與 gitleaks 也起不來。舊專案資料相容，`update` 即可。
+
+- 根因（查證見 T-0047 結果檔）：該機 Codex 的 shell 工具在沙箱起不來（`setup refresh had errors`），Codex 改用 node_repl 工具（Codex 桌面版裝的 MCP 伺服器）跑命令；MCP 伺服器只拿到 Codex 的預設環境變數清單，node_repl 再只把 `NODE_REPL_UNTRUSTED_ENV_ALLOWLIST` 列的名稱交給模型程式碼 → 沒有 `SystemDrive`、沒有 `AI_REVIEW_PYTHON`。
+- `codex-review` 啟動時用 `-c` 把變數帶進沙箱（只對這次審查有效，不改 Codex 設定檔）：
+  - shell 工具：`shell_environment_policy.set.<名稱>`（官方設定）——`AI_REVIEW_PYTHON`，Windows 另加 `SYSTEMDRIVE`、`SYSTEMROOT`、`WINDIR`、`PROGRAMDATA`。
+  - node_repl（先用 `codex mcp get node_repl --json` 確認有設定才補；沒設定的伺服器硬補會讓 Codex 報 invalid transport 起不來）：`mcp_servers.node_repl.env.<名稱>`（官方設定）＋把名稱加進它的放行名單（原值保留在前；只放行系統位置變數與 `AI_REVIEW_PYTHON`，不放帳號或金鑰類）。放行名單的作用取自本機 node_repl 執行檔內的程式碼，不是官方文件，Codex 改版可能失效。
+  - `--print` 列出帶進去的全部 `-c` 與 node_repl 狀態；`--no-sandbox-env` 可退回不帶設定。
+- 審後比對：`codex-review` 審前審後各取一次工作區清單（與指紋同一套收檔規則），審查期間多出、改掉或刪掉的檔會印警告，寫進 `.done`（`workspace_changes`、`fingerprint_drift`、`warnings`）與紀錄檔末尾。專案根目錄新出現字面名稱的 `%變數%` 資料夾（即使被 `.gitignore` 排除）也會提醒（`literal_env_dirs`）。**不自動刪任何檔**。
+- `$independent-review` 與 `review-spec.md`：`AI_REVIEW_PYTHON` 改寫成「會帶進沙箱」（原寫「一定有」，實際 node_repl 路徑拿不到）；`py` 也起不來時用專案虛擬環境的直譯器並寫進限制；暫存檔不准留在專案資料夾；指紋不符時先看 `git status --porcelain` 有沒有審查期間才出現的檔並寫進報告。
+- `workflow.md`、README、`daily-usage.md` 同步。
+- 指紋演算法與值不變（只把收檔步驟抽成共用函式）。
+- 測試 92 → 106 項（T19 命令帶 `-c` 設定且是合法 TOML、node_repl 有無設定兩種、`--no-sandbox-env`；T20 審查期間多出檔案會警告、寫進 `.done` 與紀錄、不刪；T20b 被忽略的字面資料夾仍提醒但不算指紋漂移）。
+
 ## 0.2.1 — 2026-10-04
 
 修正：Codex 每次審查都先用 `py` 失敗一次才改用 `AI_REVIEW_PYTHON`（vocab-rpg 09-27～09-28 的 17 次背景審查次次如此；結果正確，只是多一步）。

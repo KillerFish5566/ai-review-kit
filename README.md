@@ -39,7 +39,7 @@ ai-review-kit/
 ├ claude/skills/   safety-setup、review-ready、review-fix（Claude Code Skills）
 ├ codex/skills/    independent-review（Codex Skill，裝到專案 .agents/skills/）
 ├ tools/kit.py     安裝／更新／狀態／還原／打包 ＋ 專案內的快照／檢查／狀態／關卡／hook
-├ tools/tests/     自動化驗證（暫存專案，67 個檢查點）
+├ tools/tests/     自動化驗證（暫存專案，106 個檢查點）
 └ docs/            codex-start.md（讓 Codex 接手）、daily-usage.md（日常）、offline-setup.md（帶到不能連 GitHub 的電腦）
 ```
 
@@ -70,7 +70,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 | `status` | 套件版本、來源版本、使用者改過哪些檔、hooks／Skills／入口是否就位、目前流程狀態 |
 | `restore --yes` | 還原最近一次安裝／更新前的狀態（先列清單）；可逐次往前還原 |
 | `relink [--python "py -3"]` | 換電腦後重寫 hook 的直譯器、重建 `local.json` |
-| `codex-review [--detach] [--print]` | 在專案裡執行：用工作區沙箱啟動 Codex 審查最新交接，紀錄寫 `.ai-review/.cache/codex-<H>.log`，結束寫 `.done`；找不到 codex 時 exit 3 並提示手動退路 |
+| `codex-review [--detach] [--print]` | 在專案裡執行：用工作區沙箱啟動 Codex 審查最新交接，紀錄寫 `.ai-review/.cache/codex-<H>.log`，結束寫 `.done`；找不到 codex 時 exit 3 並提示手動退路。用 `-c` 把 `AI_REVIEW_PYTHON`、`SystemDrive` 等環境變數帶進沙箱（只對這次有效，不改 Codex 設定檔；`--print` 列出全部）；審完比對工作區，審查期間多出或被改的檔會警告並寫進 `.done`，不自動刪 |
 | `pack` | 打離線 zip 到 `dist/` |
 | `check-update --url <VERSION 檔網址>` | 只查版本號，不自動更新；沒網路就如實說「未檢查更新」 |
 
@@ -100,6 +100,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 - 非 git 專案沒有快照參照，指紋改用檔案雜湊。
 - Codex 的 `$independent-review` Skill 已在實際專案用 `codex exec` 背景跑過多輪（2026-09-25 起）；Codex 端的 SessionStart hook 仍未驗證。自動化測試用假的 codex 驗證命令形狀與紀錄，不會真的呼叫 Codex。
 - `codex-review` 依賴本機的 Codex 登入與額度；額度不足時不會有審查報告，要照 `config.md` 第 6 節記下哪份交接尚未審。
+- Windows 上 Codex 的 shell 工具起不來時（沙箱「setup refresh had errors」），Codex 會改用 node_repl 工具跑命令；kit 對 node_repl 補的放行名單（`NODE_REPL_UNTRUSTED_ENV_ALLOWLIST`）取自本機 node_repl 執行檔內的程式碼，不是官方文件，Codex 改版可能失效。失效時審後比對會警告；`--no-sandbox-env` 可退回不帶設定。
 - 指紋在 CI 與本機可能因 CRLF 正規化設定不同而不一致（`core.autocrlf` 混用時）；遇到就以本機為準並在 CI 停用 gate。
 
 ## 驗證
@@ -107,4 +108,4 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 ```
 py -3 tools/tests/test_kit.py
 ```
-在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、預覽列出實裝會寫的每一個檔、指紋不寫進專案 git 物件庫、`codex-review` 的命令形狀／環境／拒絕條件（假 codex）、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update。測試資料夾不會自動刪除。
+在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、預覽列出實裝會寫的每一個檔、指紋不寫進專案 git 物件庫、`codex-review` 的命令形狀／環境／拒絕條件／帶進沙箱的 `-c` 設定／審後多出檔案的警告（假 codex）、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update。測試資料夾不會自動刪除。

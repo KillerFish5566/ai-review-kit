@@ -449,9 +449,94 @@ def main():
     check("T18 跑完狀態已推導為 no-blocking-found", st["status"] == "no-blocking-found", json.dumps(st)[-300:])
     rc, out, err = kit("codex-review", "--codex", str(fake), cwd=p10, script=p10kit)
     check("T18 已有獨立審查 → 不重跑（exit 1）", rc == 1 and "--again" in out, out[-300:])
+
+    # ---------------- T19 沙箱環境變數：-c 設定帶進 codex 命令（2026-10-11 新增）
+    def overrides_of(av):
+        res = {}
+        for i, x in enumerate(av[:-1]):
+            if x == "-c" and "=" in av[i + 1]:
+                k, v = av[i + 1].split("=", 1)
+                res[k] = v
+        return res
+
+    def toml_value(v):
+        try:
+            import tomllib
+        except ImportError:          # Python 3.10 以下沒有 tomllib：只比字面
+            return json.loads(v)
+        return tomllib.loads("v = " + v)["v"]
+
+    ov = overrides_of(argv)
+    want_py = envr.get("AI_REVIEW_PYTHON")
+    shell_py = ov.get("shell_environment_policy.set.AI_REVIEW_PYTHON")
+    check("T19 codex 命令帶 -c shell_environment_policy.set.AI_REVIEW_PYTHON（合法 TOML、值＝實體直譯器）",
+          shell_py is not None and toml_value(shell_py) == want_py, json.dumps(ov, ensure_ascii=False)[:600])
+    if os.name == "nt":
+        sd = ov.get("shell_environment_policy.set.SYSTEMDRIVE")
+        check("T19 Windows：shell 層帶 SYSTEMDRIVE、SYSTEMROOT",
+              sd is not None and toml_value(sd).endswith(":") and "shell_environment_policy.set.SYSTEMROOT" in ov,
+              json.dumps(ov, ensure_ascii=False)[:600])
+    allow = ov.get("mcp_servers.node_repl.env.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST")
+    names = toml_value(allow).split(",") if allow else []
+    check("T19 node_repl 已設定 → 補 env.AI_REVIEW_PYTHON、放行清單保留原值在前並加上 AI_REVIEW_PYTHON",
+          names[:1] == ["CODEX_WINDOWS_REGISTERED_CORE"] and "AI_REVIEW_PYTHON" in names
+          and ("SYSTEMDRIVE" in names if os.name == "nt" else True)
+          and toml_value(ov.get("mcp_servers.node_repl.env.AI_REVIEW_PYTHON", '""')) == want_py,
+          json.dumps(ov, ensure_ascii=False)[:600])
+    check("T19 -c 設定都放在 exec 之後、-C 之前，交接編號仍是最後一個參數",
+          argv[0] == "exec" and argv.index("-c") < argv.index("-C") and argv[-1] == f"$independent-review {H}", json.dumps(argv)[:600])
+    check("T19 乾淨的審查 .done 不帶工作區變動警告",
+          "workspace_changes" not in done and "warnings" not in done and "fingerprint_drift" not in done, json.dumps(done))
+    rc, out, err = kit("codex-review", "--print", "--again", "--codex", str(fake), cwd=p10, script=p10kit)
+    check("T19 --print 顯示帶進沙箱的 -c 設定與 node_repl 狀態",
+          rc == 0 and "shell_environment_policy.set.AI_REVIEW_PYTHON=" in out and "node_repl：已設定" in out, out[-800:])
+    rc, out, err = sh([PY, str(p10kit), "codex-review", "--print", "--again", "--codex", str(fake)], cwd=p10,
+                      env=dict(ENV, FAKE_CODEX_MCP="none"))
+    check("T19 沒設定 node_repl → 不補 mcp_servers 設定（避免 Codex 報 invalid transport）",
+          rc == 0 and "mcp_servers." not in out and "node_repl：沒有設定" in out
+          and "shell_environment_policy.set.AI_REVIEW_PYTHON=" in out, out[-800:])
+    rc, out, err = kit("codex-review", "--print", "--again", "--no-sandbox-env", "--codex", str(fake), cwd=p10, script=p10kit)
+    check("T19 --no-sandbox-env → 命令不帶任何 -c", rc == 0 and " -c " not in out.split("\n", 1)[0], out[-500:])
+
+    # T18 最後一項（放在 T19 之後：T19 的 --print 需要交接仍相符）
     write(p10 / "app.py", read(p10 / "app.py") + "\n# changed after handoff\n")
     rc, out, err = kit("codex-review", "--codex", str(fake), "--again", cwd=p10, script=p10kit)
     check("T18 交接後又改過 → 不啟動（exit 1）", rc == 1 and "不符" in out, out[-300:])
+
+    # ---------------- T20 審後比對：審查期間工作區多出檔案 → 警告、寫進 .done 與紀錄、不刪（2026-10-11 新增）
+    rc, out, err = kit("snapshot", "--json", cwd=p10, script=p10kit)
+    snap2 = json.loads(out) if rc == 0 else {}
+    H2 = snap2.get("id", "H-missing")
+    write(p10 / f".ai-review/handoffs/{H2}.md", front(H2, "handoff", target=snap2.get("target"), snapshot_ref=snap2.get("snapshot_ref"),
+                                                        head=snap2.get("head"), base=snap2.get("base"), recheck_of="", scope="t20"))
+    rc, out, err = sh([PY, str(p10kit), "codex-review", "--codex", str(fake)], cwd=p10, env=dict(ENV, FAKE_CODEX_MODE="dirty"))
+    junk_rel = "%SystemDrive%/ProgramData/Microsoft/Windows/Caches/cversions.2.db"
+    done2p = p10 / f".ai-review/.cache/codex-{H2}.done"
+    done2 = json.loads(read(done2p)) if done2p.exists() else {}
+    log2 = read(p10 / f".ai-review/.cache/codex-{H2}.log") if (p10 / f".ai-review/.cache/codex-{H2}.log").exists() else ""
+    check("T20 審查期間多出檔案 → 印出警告並列出路徑", "⚠️" in out and junk_rel in out and "不會自動刪" in out, out[-800:] + err[-300:])
+    check("T20 .done 記下 workspace_changes、指紋漂移與警告",
+          junk_rel in (done2.get("workspace_changes") or {}).get("added", []) and done2.get("fingerprint_drift") is True
+          and done2.get("warnings"), json.dumps(done2, ensure_ascii=False)[:800])
+    check("T20 紀錄檔附上審後檢查段", "[ai-review-kit 審後檢查]" in log2 and junk_rel in log2, log2[-600:])
+    check("T20 多出來的檔沒有被刪", (p10 / junk_rel).is_file())
+    check("T20 .done 記下字面環境變數名資料夾", done2.get("literal_env_dirs") == ["%SystemDrive%"], json.dumps(done2, ensure_ascii=False)[:400])
+
+    # T20b 字面資料夾被 .gitignore 排除：指紋不受影響，但仍提醒「環境變數沒帶進去」
+    write(p10 / ".gitignore", read(p10 / ".gitignore") + "/%Windir%/\n/%SystemDrive%/\n")
+    rc, out, err = kit("snapshot", "--json", cwd=p10, script=p10kit)
+    snap3 = json.loads(out) if rc == 0 else {}
+    H3 = snap3.get("id", "H-missing")
+    write(p10 / f".ai-review/handoffs/{H3}.md", front(H3, "handoff", target=snap3.get("target"), snapshot_ref=snap3.get("snapshot_ref"),
+                                                        head=snap3.get("head"), base=snap3.get("base"), recheck_of="", scope="t20b"))
+    rc, out, err = sh([PY, str(p10kit), "codex-review", "--codex", str(fake)], cwd=p10,
+                      env=dict(ENV, FAKE_CODEX_MODE="dirty", FAKE_CODEX_JUNK="%Windir%"))
+    done3p = p10 / f".ai-review/.cache/codex-{H3}.done"
+    done3 = json.loads(read(done3p)) if done3p.exists() else {}
+    check("T20b 被忽略的字面資料夾：不算工作區變動、指紋不漂移，但 .done 與輸出仍提醒",
+          rc == 0 and done3.get("literal_env_dirs") == ["%Windir%"] and "workspace_changes" not in done3
+          and "fingerprint_drift" not in done3 and "%Windir%" in out and done3.get("verdict") == "no-blocking-found",
+          out[-600:] + json.dumps(done3, ensure_ascii=False)[:600])
 
     # ---------------- 總結
     fails = [r for r in RESULTS if not r[1]]

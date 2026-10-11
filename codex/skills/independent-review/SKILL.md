@@ -7,7 +7,9 @@ description: 以獨立審查者身分審查最新的交接（.ai-review/handoffs
 
 你是獨立審查者，不是寫這段程式的 AI。完整規範：`.ai-review/kit/review-spec.md`。範本：`.ai-review/kit/templates/review.md`。**預設只審不改**：不修改實作、不 commit、不 push。
 
-**怎麼跑 kit.py**：先看環境變數 `AI_REVIEW_PYTHON`——有值（背景啟動 `kit.py codex-review` 時一定有）就**直接用它**，PowerShell 寫 `& $env:AI_REVIEW_PYTHON .ai-review/kit/kit.py …`，不要先試 `py`；沒有值才用 `py -3`（macOS／Linux 用 `python3`）。本文件寫的 `py -3` 指令都照這條換。理由：Windows 沙箱裡 `py` 是應用程式別名，沙箱帳號啟動不了。
+**怎麼跑 kit.py**：先看環境變數 `AI_REVIEW_PYTHON`——有值（背景啟動 `kit.py codex-review` 時會帶進沙箱，shell 與 node_repl 工具都有）就**直接用它**，PowerShell 寫 `& $env:AI_REVIEW_PYTHON .ai-review/kit/kit.py …`，不要先試 `py`；沒有值才用 `py -3`（macOS／Linux 用 `python3`）；兩個都起不來才用專案虛擬環境的直譯器（例如 `.venv/Scripts/python.exe`），並在報告「限制」寫明。本文件寫的 `py -3` 指令都照這條換。理由：Windows 沙箱裡 `py` 是應用程式別名，沙箱帳號啟動不了。
+
+**不要弄髒工作目錄**：暫存檔一律寫到 `TMP`／`TEMP` 指的地方（背景啟動時是 `.ai-review/.cache/tmp`），不要在專案資料夾留下任何檔；專案裡多一個未追蹤檔，指紋就對不上。
 
 ## 步驟
 
@@ -15,7 +17,7 @@ description: 以獨立審查者身分審查最新的交接（.ai-review/handoffs
 2. 找最新交接：`.ai-review/handoffs/` 編號最大的 `H-*.md`（或使用者指定）。讀檔頭 `target`、`snapshot_ref`、`base`、`recheck_of`。
 3. 核對指紋：`py -3 .ai-review/kit/kit.py verify --handoff <H-id>`（直譯器照上面「怎麼跑 kit.py」選）。
    - 指紋計算不寫 `.git`（新物件寫在暫存區），沙箱不准寫 `.git` 也能核對；還是失敗就照下面「無法執行指令」處理，並把錯誤訊息寫進限制。
-   - 不符 → 停止，`verdict: invalid`，說明要重新交接。
+   - 不符 → 停止，`verdict: invalid`，說明要重新交接。先跑 `git status --porcelain` 看有沒有審查期間才出現的檔（例如字面名稱的 `%SystemDrive%` 資料夾，是沙箱少了環境變數時 Windows 元件留下的），有就在報告寫明，不要自己刪。
    - 無法執行指令 → 繼續，但在報告「限制」寫「未能核對指紋」。
 4. 讀實際內容：
    - `git diff <base>..<snapshot_ref>`（非 git 專案改逐檔讀交接第 2 節列的檔案）
