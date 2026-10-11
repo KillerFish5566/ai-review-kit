@@ -105,6 +105,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 - 狀態檔與報告裡的「通過」文字不是安全證明；證明是「哪個指紋、誰審、看了什麼、怎麼查」。
 - 非 git 專案沒有快照參照，指紋改用檔案雜湊。
 - Codex 的 `$independent-review` Skill 已在實際專案用 `codex exec` 背景跑過多輪（2026-09-25 起）；Codex 端的 SessionStart hook 仍未驗證。自動化測試用假的 codex 驗證命令形狀與紀錄，不會真的呼叫 Codex。
+- 手動開 Codex 只在專案根目錄開：在使用者資料夾或上層資料夾開過，Windows 版沙箱群組可能對整個資料夾樹留下「可修改」權限並記進信任清單，關掉後仍在（2026-10-11 實測；細節與收回方式見 `docs/codex-start.md`）。`codex-review` 一律 `-C <專案>`，不受影響。
 - `codex-review` 依賴本機的 Codex 登入與額度；額度不足時不會有審查報告，要照 `config.md` 第 6 節記下哪份交接尚未審。
 - Windows 上 Codex 的 shell 工具起不來時（沙箱「setup refresh had errors」），Codex 會改用 node_repl 工具跑命令；kit 對 node_repl 補的放行名單（`NODE_REPL_UNTRUSTED_ENV_ALLOWLIST`）取自本機 node_repl 執行檔內的程式碼，不是官方文件，Codex 改版可能失效。失效時審後比對會警告；`--no-sandbox-env` 可退回不帶設定。
 - 指紋在 CI 與本機可能因 CRLF 正規化設定不同而不一致（`core.autocrlf` 混用時）；遇到就以本機為準並在 CI 停用 gate。

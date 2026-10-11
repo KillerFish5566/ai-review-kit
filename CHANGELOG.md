@@ -3,6 +3,10 @@
 版本規則：patch＝修 bug 不改行為；minor＝加功能且舊專案資料相容；major＝專案資料需轉換或使用方式改變。
 每次發版：改 `VERSION`、在這裡加一段、`kit.py pack` 重打離線包。
 
+## 未發版
+
+文件：`docs/codex-start.md` 新增「只在專案資料夾開 Codex」一節，README「限制」加一條。2026-10-11 實測：在使用者資料夾開過 Codex 後，Windows 版沙箱群組對整個資料夾樹（含 Claude Code 設定夾、其他專案）留下「可修改」權限並記進 `~/.codex/config.toml` 信任清單，關掉後仍在。`codex-review` 一律 `-C <專案>`，不受影響。程式沒改。
+
 ## 0.4.1 — 2026-10-11
 
 修正：`ignore-check` 單一探針漏判（Codex 審查 R-20261011-1654-1，medium）。`.gitignore` 只寫 `credentials.*` 時，`credentials*` 會被判成「已排除」，但 `credentials-prod.json` 其實沒被排除——因為每條只用一個代表路徑（`credentials.json`）問 git。舊專案資料相容。
