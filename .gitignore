@@ -11,3 +11,26 @@ secrets.*
 .vscode/
 .idea/
 .claude/settings.local.json
+
+# 機密與金鑰（補齊標準清單，2026-10-11）
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa*
+id_ed25519*
+
+# AI 工具的逐字稿與記憶
+.claude/
+*.jsonl
+memory/
+
+# 其他 IDE 與作業系統暫存
+*.code-workspace
+*.swp
+*~
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+$RECYCLE.BIN/
