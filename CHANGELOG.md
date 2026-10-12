@@ -7,7 +7,7 @@
 
 文件：`docs/codex-start.md` 新增「只在專案資料夾開 Codex」一節，README「限制」加一條。2026-10-11 實測：在使用者資料夾開過 Codex 後，Windows 版沙箱群組對整個資料夾樹（含 Claude Code 設定夾、其他專案）留下「可修改」權限並記進 `~/.codex/config.toml` 信任清單，關掉後仍在。`codex-review` 一律 `-C <專案>`，不受影響。程式沒改。
 
-公開準備（2026-10-12）：加 `LICENSE`（MIT，KillerFish5566）；`README.md` 改成英文主檔，原中文說明移到 `README.zh-TW.md`（兩檔互相連結）；`docs/offline-setup.md` 改成通用說法「帶到另一台不能連 GitHub 的電腦」。程式沒改。已知：`pack` 的收錄清單還沒有 `LICENSE` 與 `README.zh-TW.md`，下次改程式發版時一起補。
+公開準備（2026-10-12）：加 `LICENSE`（MIT，KillerFish5566）；`README.md` 改成英文主檔，原中文說明移到 `README.zh-TW.md`（兩檔互相連結）；`docs/offline-setup.md` 改成通用說法「帶到另一台不能連 GitHub 的電腦」。程式沒改。兩份 README「限制」補一條：Windows 上 Codex 沙箱裡 gitleaks 可能起不來，審查端沒有獨立機密掃描。已知：`pack` 的收錄清單還沒有 `LICENSE` 與 `README.zh-TW.md`，下次改程式發版時一起補。
 
 ## 0.4.1 — 2026-10-11
 

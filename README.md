@@ -116,6 +116,7 @@ Other commands:
 - Open Codex by hand only in the project root. On Windows, opening it in your user folder or a parent folder can leave "modify" permissions for the sandbox group on the whole folder tree and add it to the trust list, which stays after Codex closes (observed 2026-10-11; details and how to undo in `docs/codex-start.md`). `codex-review` always uses `-C <project>` and is not affected.
 - `codex-review` needs a local Codex sign-in and quota. Without quota there is no review report; record which handoff is still unreviewed in `config.md` section 6.
 - On Windows, when Codex's shell tool fails to start (sandbox "setup refresh had errors"), Codex falls back to its node_repl tool. The allow-list the kit adds for node_repl (`NODE_REPL_UNTRUSTED_ENV_ALLOWLIST`) was taken from the local node_repl executable, not from official docs, and may break when Codex changes. The post-review comparison warns if it does; `--no-sandbox-env` turns it off.
+- On Windows, gitleaks may fail to start inside the Codex sandbox (spawn EPERM; observed 2026-10-12, also with the full path). The reviewer then has no secret scan of its own, only the one the development side ran at handoff, and the review report says so.
 - Fingerprints can differ between CI and a local machine when `core.autocrlf` settings differ. If that happens, trust the local result and disable gate in CI.
 
 ## Tests
