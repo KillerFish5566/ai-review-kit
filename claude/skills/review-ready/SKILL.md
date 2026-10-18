@@ -43,7 +43,7 @@ argument-hint: "[--recheck R-xxx] [--base <ref>] [一句話描述本次變更範
    py -3 .ai-review/kit/kit.py codex-review
    ```
    - Claude Code 裡用 Bash 工具的 `run_in_background` 執行（指令會等 Codex 跑完才結束，結束時你會收到通知）；不是在 Claude Code 裡就加 `--detach`，它會丟到背景立刻返回。
-   - 這個指令固定用工作區沙箱（`-s workspace-write`）、TMP 指到 `.ai-review/.cache/tmp`、模型照 Codex 設定檔；**不得**自己改用 `--dangerously-bypass-approvals-and-sandbox` 或加 `-m`。
+   - 這個指令固定用沙箱：Codex 設定檔有 `default_permissions`（權限設定檔）就用它（`-c default_permissions`，不帶 `-s`），沒有就用工作區沙箱（`-s workspace-write`）；TMP 指到 `.ai-review/.cache/tmp`、模型照 Codex 設定檔；**不得**自己改用 `--dangerously-bypass-approvals-and-sandbox` 或加 `-m`。
    - 它會拒絕：交接後程式又改過（重新交接）、這份交接已有審查（真的要重審才加 `--again`）、同一份正在跑。
    - exit 3＝找不到 codex → 走退路：請使用者在專案根目錄開 Codex 輸入 `$independent-review`（`.ai-review/kit/docs/codex-start.md`）。
    - 使用者說「這次我自己開 Codex」也走退路，不要硬跑。

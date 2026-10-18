@@ -90,6 +90,8 @@ def main():
     root = Path(a.dir) if a.dir else Path(tempfile.mkdtemp(prefix="ai-review-kit-test-"))
     root.mkdir(parents=True, exist_ok=True)
     print(f"測試根目錄：{root}")
+    # 不讀測試者自己的 Codex 設定檔（codex-review 會看它有沒有 default_permissions）：一律指到測試用的空資料夾
+    ENV["CODEX_HOME"] = str(root / "codex-home-empty")
 
     # ---------------- T1 新專案安裝
     p1 = new_git_project(root, "p1-new")
@@ -423,7 +425,7 @@ def main():
         write(fake, f'#!/bin/sh\nexec "{PY}" "{fake_py}" "$@"\n')
         fake.chmod(0o755)
     rc, out, err = kit("codex-review", "--print", "--codex", str(fake), cwd=p10, script=p10kit)
-    check("T18 --print 列出工作區沙箱命令、不含繞過旗標與 -m",
+    check("T18 --print 列出工作區沙箱命令、不含繞過旗標與 -m（測試的 CODEX_HOME 是空的 → 舊式 -s）",
           rc == 0 and "-s workspace-write" in out and "bypass" not in out and " -m " not in out
           and f"$independent-review {H}" in out, out[-500:] + err[-300:])
     rc, out, err = kit("codex-review", "--codex", str(root / "no-such-codex.exe"), cwd=p10, script=p10kit)
@@ -497,6 +499,64 @@ def main():
           and "shell_environment_policy.set.AI_REVIEW_PYTHON=" in out, out[-800:])
     rc, out, err = kit("codex-review", "--print", "--again", "--no-sandbox-env", "--codex", str(fake), cwd=p10, script=p10kit)
     check("T19 --no-sandbox-env → 命令不帶任何 -c", rc == 0 and " -c " not in out.split("\n", 1)[0], out[-500:])
+
+    # ---------------- T29 送審權限：Codex 設定檔有 default_permissions → 不帶 -s、改帶 -c default_permissions（T-0081，未發版）
+    check("T29 Codex 設定檔沒有 default_permissions → 照舊 -s workspace-write，.done 記 legacy",
+          "-s" in argv and "default_permissions" not in json.dumps(argv)
+          and (done.get("permissions") or {}).get("mode") == "legacy", json.dumps(done, ensure_ascii=False)[:400])
+    ch_profile = root / "codex-home-profile"
+    write(ch_profile / "config.toml", 'model = "x"\ndefault_permissions = "review-safe"\n\n[windows]\nsandbox = "mxc"\n\n'
+          '[permissions.review-safe]\nextends = ":workspace"\n\n[permissions.review-safe.filesystem]\n"~/.ssh" = "deny"\n')
+    env_profile = dict(ENV, CODEX_HOME=str(ch_profile))
+    rc, out, err = sh([PY, str(p10kit), "codex-review", "--again", "--codex", str(fake)], cwd=p10, env=env_profile)
+    rec = json.loads(read(p10 / ".ai-review/.cache/fake-record.json"))
+    argv_p = rec.get("argv", [])
+    ov_p = overrides_of(argv_p)
+    done_p = json.loads(read(p10 / f".ai-review/.cache/codex-{H}.done"))
+    check("T29 有 default_permissions → 命令不帶 -s／--sandbox，改帶 -c default_permissions=\"review-safe\"",
+          rc == 0 and "-s" not in argv_p and "--sandbox" not in argv_p and "workspace-write" not in argv_p
+          and toml_value(ov_p.get("default_permissions", '""')) == "review-safe", json.dumps(argv_p)[:600])
+    check("T29 權限的 -c 也在 -C 之前、沙箱環境變數設定照帶、交接編號仍是最後一個參數",
+          argv_p.index("-C") > max(i for i, x in enumerate(argv_p) if x == "-c")
+          and "shell_environment_policy.set.AI_REVIEW_PYTHON" in ov_p and argv_p[-1] == f"$independent-review {H}",
+          json.dumps(argv_p)[:600])
+    check("T29 .done 記下權限設定檔名稱與來源、執行時印出沙箱權限",
+          (done_p.get("permissions") or {}).get("mode") == "profile" and done_p["permissions"].get("profile") == "review-safe"
+          and str(ch_profile) in done_p["permissions"].get("source", "") and "沙箱權限：權限設定檔 review-safe" in out,
+          json.dumps(done_p, ensure_ascii=False)[:500] + out[-300:])
+    rc, out, err = sh([PY, str(p10kit), "codex-review", "--print", "--again", "--no-sandbox-env", "--codex", str(fake)],
+                      cwd=p10, env=env_profile)
+    first = out.split("\n", 1)[0]
+    check("T29 --no-sandbox-env 仍帶權限設定檔（只關環境變數那層）",
+          rc == 0 and first.count(" -c ") == 1 and "default_permissions=" in first and "workspace-write" not in first, out[-500:])
+    rc, out, err = kit("codex-review", "--print", "--again", "--permissions", "my-profile", "--codex", str(fake), cwd=p10, script=p10kit)
+    first = out.split("\n", 1)[0]
+    check("T29 --permissions 指定 → 用指定名稱、不帶 -s（設定檔沒有 default_permissions 也一樣）",
+          rc == 0 and "my-profile" in first and "default_permissions=" in first and "workspace-write" not in first
+          and "--permissions 指定" in out, out[-500:])
+    for bad in (":danger-no-sandbox", "x\"y", "a b"):
+        rc, out, err = kit("codex-review", "--print", "--again", "--permissions", bad, "--codex", str(fake), cwd=p10, script=p10kit)
+        check(f"T29 不接受的權限名稱 {bad!r} → exit 2、不啟動", rc == 2 and "不接受" in out and "將執行" not in out, out[-300:])
+    ch_nested = root / "codex-home-nested"
+    write(ch_nested / "config.toml", '[profiles.x]\ndefault_permissions = "review-safe"\n')
+    rc, out, err = sh([PY, str(p10kit), "codex-review", "--print", "--again", "--codex", str(fake)], cwd=p10,
+                      env=dict(ENV, CODEX_HOME=str(ch_nested)))
+    check("T29 default_permissions 只在 [表格] 裡、不在最上層 → 不算，照舊 -s workspace-write",
+          rc == 0 and "-s workspace-write" in out and "default_permissions=" not in out.split("\n", 1)[0], out[-400:])
+    ch_bad = root / "codex-home-badtoml"
+    write(ch_bad / "config.toml", 'default_permissions = "review-safe"\n[[[broken\n')
+    rc, out, err = sh([PY, str(p10kit), "codex-review", "--print", "--again", "--codex", str(fake)], cwd=p10,
+                      env=dict(ENV, CODEX_HOME=str(ch_bad)))
+    check("T29 Codex 設定檔壞掉 → 照舊 -s workspace-write 並說明原因（不猜）",
+          (rc == 0 and "-s workspace-write" in out and "不是合法 TOML" in out) or sys.version_info < (3, 11), out[-400:])
+    rc, out, err = sh([PY, str(p10kit), "doctor", "--json", "--codex", str(fake)], cwd=p10, env=env_profile)
+    dj = json.loads(out) if rc == 0 else {}
+    dperm = next((i for i in dj.get("items", []) if i["key"] == "codex_permissions"), {})
+    rc2, out2, err2 = kit("doctor", "--json", "--codex", str(fake), cwd=p10, script=p10kit)
+    dperm2 = next((i for i in (json.loads(out2) if rc2 == 0 else {}).get("items", []) if i["key"] == "codex_permissions"), {})
+    check("T29 doctor 列出送審沙箱權限：有設定檔 ✓、沒有 ？並提示怎麼擋讀取",
+          dperm.get("ok") is True and "review-safe" in dperm.get("detail", "")
+          and dperm2.get("ok") is None and "workspace-write" in dperm2.get("detail", ""), out[-400:] + out2[-400:])
 
     # T18 最後一項（放在 T19 之後：T19 的 --print 需要交接仍相符）
     write(p10 / "app.py", read(p10 / "app.py") + "\n# changed after handoff\n")
@@ -876,7 +936,8 @@ def main():
     check("T26 白話輸出有表格與「只提醒」說明", rc == 0 and "| Codex 登入 | ✓ |" in out and "只提醒" in out and "唯讀" in out, out[-500:])
     check("T26 唯讀：doctor 跑完專案每個檔位元組都沒變", tree_bytes(p17) == p17_before)
     check("T26 --json 欄位齊全", all(k in d for k in ("target", "items", "project", "note"))
-          and {i["key"] for i in d["items"]} == {"git", "codex", "codex_login", "node_repl", "gitleaks", "pip_audit", "python"}, str(d)[:300])
+          and {i["key"] for i in d["items"]} == {"git", "codex", "codex_login", "node_repl", "codex_permissions", "gitleaks", "pip_audit",
+                                                    "python"}, str(d)[:300])
 
     # ---------------- T27 state.json 不進版控：.gitignore 補一行、仍被追蹤只提醒不動 index（未發版）
     p19 = new_git_project(root, "p19-state-ignore")

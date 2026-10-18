@@ -11,6 +11,7 @@
 - 那個資料夾也會被記進 `~/.codex/config.toml` 的信任清單（`[projects.'<路徑>'] trust_level = "trusted"`）。
 - 收回要手動改檔案權限、刪掉信任清單那一筆；而且只要再在那裡開一次，⚠️推測權限又會被加回去。
 - 就算只在專案裡開，沙箱每次執行仍會對它要讀的範圍補一筆「讀取＋執行」權限（⚠️推測是沙箱設計），所以 Codex 還是讀得到專案外的檔，只是不能改。審查只寫 `.ai-review/reviews/`，是靠審查規範與審後比對把關，不是靠權限擋住。
+- 要真的擋住讀取（例如 `~/.ssh`、Codex 登入憑證 `~/.codex/auth.json`），在 `~/.codex/config.toml` 設權限設定檔：最上面（任何 `[表格]` 之前）寫 `default_permissions = "<名稱>"`，再寫 `[permissions.<名稱>]`（`extends = ":workspace"`）與 `[permissions.<名稱>.filesystem]`，要擋的路徑寫 `= "deny"`（官方權限文件；Windows 要 mxc 或 elevated 沙箱才支援）。`codex-review` 看到 `default_permissions` 就改帶 `-c default_permissions`、不帶 `-s workspace-write`——帶了 `-s`，權限設定檔會整組被忽略（Codex 0.162.1 原始碼）。`kit.py doctor` 會列出送審用的是哪一種。
 
 `/review-ready` 背景啟動的 `kit.py codex-review` 一律帶 `-C <專案>`，不受影響；這段是給手動開 Codex 的時候看的。
 

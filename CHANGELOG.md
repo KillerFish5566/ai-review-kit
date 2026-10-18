@@ -9,6 +9,14 @@
 
 公開準備（2026-10-12）：加 `LICENSE`（MIT，KillerFish5566）；`README.md` 改成英文主檔，原中文說明移到 `README.zh-TW.md`（兩檔互相連結）；`docs/offline-setup.md` 改成通用說法「帶到另一台不能連 GitHub 的電腦」。程式沒改。兩份 README「限制」補一條：Windows 上 Codex 沙箱裡 gitleaks 可能起不來，審查端沒有獨立機密掃描。已知：`pack` 的收錄清單還沒有 `LICENSE` 與 `README.zh-TW.md`，下次改程式發版時一起補。
 
+送審權限（2026-10-18）：`codex-review` 支援 Codex 權限設定檔。使用者的 Codex 設定檔（`CODEX_HOME` 或 `~/.codex/config.toml`）最上層有 `default_permissions` → 命令改帶 `-c default_permissions="<名稱>"`、**不帶 `-s workspace-write`**；沒有 → 照舊 `-s workspace-write`（舊專案、沒設權限設定檔的人行為不變）。原因：Codex 0.162.1 只要命令列帶 `-s`，就改走舊式沙箱設定，`[permissions.*]` 的禁止讀取清單整組不生效，`-s` 和 `-c default_permissions` 同時帶還會報錯（openai/codex `core/src/config/mod.rs`）；Windows 的 mxc 沙箱預設整顆硬碟可讀，要靠禁止清單擋 `~/.ssh`、`~/.codex/auth.json`。
+
+- 新旗標 `codex-review --permissions <名稱>`：指定權限設定檔（`--detach` 會傳給背景程序）。名稱只收英數字與 `_ . -`（可加開頭 `:`），含 `danger` 一律拒絕（exit 2，不啟動）。
+- 名稱一律用 `-c` 釘在命令列（優先於專案資料夾裡的 Codex 設定）；只讀設定檔最上層這一個鍵，`[表格]` 裡的同名鍵不算；設定檔壞掉 → 退回 `-s workspace-write` 並印原因。
+- 用了哪一種印在畫面（`沙箱權限：…`、`--print` 也列）並寫進 `.done` 的 `permissions`（`mode` legacy／profile、`profile`、`source`）。`doctor` 多一項「送審沙箱權限」。
+- 測試 169 → 181 項（T29；測試一律把 `CODEX_HOME` 指到空資料夾，不讀測試者自己的 Codex 設定檔）；T26 `doctor` 欄位清單多 `codex_permissions`。
+- 已知限制（2026-10-18 實測，Codex 0.162.1、Windows mxc 沙箱）：禁止清單只擋「讀檔案內容」，不擋「列出資料夾」——被禁的資料夾在沙箱裡仍看得到檔名與子資料夾名稱，內容讀不到。
+
 ## 0.4.1 — 2026-10-11
 
 修正：`ignore-check` 單一探針漏判（Codex 審查 R-20261011-1654-1，medium）。`.gitignore` 只寫 `credentials.*` 時，`credentials*` 會被判成「已排除」，但 `credentials-prod.json` 其實沒被排除——因為每條只用一個代表路徑（`credentials.json`）問 git。舊專案資料相容。

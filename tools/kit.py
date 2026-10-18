@@ -1407,9 +1407,69 @@ def sandbox_overrides(codex, target, env):
     return [x for o in ov for x in ("-c", o)], notes
 
 
-def codex_review_cmd(codex, target, hid, is_git, overrides=()):
-    # 固定形狀：工作區可寫沙箱、不覆寫模型（照 Codex 設定檔）、永遠不加 --dangerously-bypass-approvals-and-sandbox
-    cmd = [codex, "exec", *overrides, "-C", str(target), "-s", "workspace-write"]
+# 送審權限（未發版）：Codex 的「權限設定檔」（config.toml 的 [permissions.<名稱>]＋最上層 default_permissions）
+# 可以設禁止讀取清單（"deny"），但命令列一帶 -s／--sandbox，Codex 就改走舊式沙箱設定、權限設定檔整組不生效；
+# -s 和 -c default_permissions 同時帶還會直接報錯（openai/codex rust-v0.162.1 core/src/config/mod.rs）。
+# 所以：使用者的 Codex 設定檔有 default_permissions（或 --permissions 指定）→ 不帶 -s，改用 -c default_permissions
+# 把同一個名稱釘住（命令列優先，專案資料夾裡的設定蓋不掉）；沒有 → 照舊 -s workspace-write。
+LEGACY_SANDBOX = ("-s", "workspace-write")
+PERMISSION_NAME_RE = re.compile(r"^:?[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def codex_config_path(env):
+    home = env.get("CODEX_HOME")
+    return (Path(home) if home else Path.home() / ".codex") / "config.toml"
+
+
+def codex_default_permissions(env):
+    """只讀使用者 Codex 設定檔最上層的 default_permissions 這一個鍵。回傳 (名稱或 None, 說明)。"""
+    p = codex_config_path(env)
+    if not p.is_file():
+        return None, f"Codex 設定檔不存在：{p}"
+    try:
+        text = p.read_text(encoding="utf-8-sig")
+    except Exception as e:
+        return None, f"讀不到 Codex 設定檔 {p}（{str(e)[:120]}）"
+    try:
+        import tomllib
+        v = tomllib.loads(text).get("default_permissions")
+    except ImportError:                      # Python 3.10 以下：只看第一個 [表格] 之前的那一行
+        v = None
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("["):
+                break
+            m = re.match(r"""default_permissions\s*=\s*(["'])([^"']*)\1\s*(#.*)?$""", s)
+            if m:
+                v = m.group(2)
+                break
+    except Exception as e:
+        return None, f"Codex 設定檔 {p} 不是合法 TOML（{str(e)[:120]}）"
+    if not isinstance(v, str) or not v:
+        return None, f"Codex 設定檔沒有 default_permissions：{p}"
+    return v, f"取自 Codex 設定檔 {p}"
+
+
+def review_permissions(env, override=None):
+    """送審要帶的權限參數。回傳 (參數清單, 白話說明, 紀錄用 dict)；名稱不合法或像繞過沙箱的名稱 → ValueError。"""
+    if override:
+        name, src = override, "--permissions 指定"
+    else:
+        name, src = codex_default_permissions(env)
+    if not name:
+        return list(LEGACY_SANDBOX), f"舊式工作區沙箱 -s workspace-write（{src}）", \
+            {"mode": "legacy", "sandbox": "workspace-write", "source": src}
+    if not PERMISSION_NAME_RE.match(name) or "danger" in name.lower():
+        raise ValueError(f"權限設定檔名稱「{name}」（{src}）不接受：只收英數字與 _ . -，且不能是 danger 類（會關掉沙箱）。")
+    return ["-c", f"default_permissions={toml_str(name)}"], \
+        f"權限設定檔 {name}（{src}；不帶 -s，設定檔裡的禁止清單才會生效）", \
+        {"mode": "profile", "profile": name, "source": src}
+
+
+def codex_review_cmd(codex, target, hid, is_git, overrides=(), perm=LEGACY_SANDBOX):
+    # 固定形狀：沙箱（權限設定檔或舊式 workspace-write，見 review_permissions）、不覆寫模型（照 Codex 設定檔）、
+    # 永遠不加 --dangerously-bypass-approvals-and-sandbox
+    cmd = [codex, "exec", *overrides, *perm, "-C", str(target)]
     if not is_git:
         cmd.append("--skip-git-repo-check")
     cmd.append(f"$independent-review {hid}")
@@ -1470,11 +1530,17 @@ def do_codex_review(args):
         overrides, ov_notes = [], ["--no-sandbox-env：不帶沙箱環境變數設定（0.2.1 行為）"]
     else:
         overrides, ov_notes = sandbox_overrides(codex, target, env)
-    cmd = codex_review_cmd(codex, target, hid, st["git"], overrides)
+    try:
+        perm, perm_note, perm_info = review_permissions(env, getattr(args, "permissions", None))
+    except ValueError as e:
+        print(f"{e}不啟動。")
+        return 2
+    cmd = codex_review_cmd(codex, target, hid, st["git"], overrides, perm)
 
     if args.print_only:
         print("將執行：" + " ".join(shlex.quote(c) for c in cmd))
         print(f"工作目錄：{target}")
+        print(f"沙箱權限：{perm_note}")
         print(f"TMP／TEMP：{tmp}")
         print(f"AI_REVIEW_PYTHON：{py}" + ("（⚠️ 這是應用程式別名，沙箱可能啟動不了）" if alias else ""))
         print("帶進沙箱的設定（-c，只對這次審查有效，不改 Codex 設定檔）：" + ("" if overrides else "無"))
@@ -1495,6 +1561,8 @@ def do_codex_review(args):
             child.append("--again")
         if args.no_sandbox_env:
             child.append("--no-sandbox-env")
+        if getattr(args, "permissions", None):
+            child += ["--permissions", args.permissions]
         kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(target)}
         if os.name == "nt":
             kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -1517,6 +1585,7 @@ def do_codex_review(args):
     started = now_str()
     write_text(running, json.dumps({"handoff": hid, "pid": os.getpid(), "started": started}, ensure_ascii=False) + "\n")
     print(f"Codex 審查交接 {hid} 開始（{started}），紀錄寫到 {rel(log, target)}")
+    print(f"沙箱權限：{perm_note}")
     for n in ov_notes:
         print(f"沙箱設定：{n}")
     try:
@@ -1534,7 +1603,7 @@ def do_codex_review(args):
     r = out.get("review") if (out.get("handoff") or {}).get("id") == hid else None
     info = {"handoff": hid, "exit": code, "started": started, "finished": now_str(),
             "review": r.get("id") if r else None, "verdict": r.get("verdict") if r else None,
-            "sandbox_env": ov_notes}
+            "sandbox_env": ov_notes, "permissions": perm_info}
     warn = []
     ch = None
     if before is None:
@@ -2039,6 +2108,13 @@ def doctor(target, codex_name=None):
     else:
         add("codex_login", "Codex 登入", None, "沒有 codex，略過")
         add("node_repl", "Codex 的 node_repl", None, "沒有 codex，略過")
+    try:
+        _, pnote, pinfo = review_permissions(os.environ)
+        add("codex_permissions", "送審沙箱權限", True if pinfo["mode"] == "profile" else None,
+            pnote if pinfo["mode"] == "profile" else
+            pnote + "：審查端讀得到工作區外；要擋讀取（例如 ~/.ssh），在 Codex 設定檔設權限設定檔與 default_permissions")
+    except ValueError as e:
+        add("codex_permissions", "送審沙箱權限", False, str(e))
     gl = find_tool("gitleaks", target)
     add("gitleaks", "gitleaks（秘密掃描）", bool(gl),
         gl or "沒裝：秘密掃描跑不了（checks 會記 skipped）；要裝請用使用者層安裝（照 gitleaks 官方說明）")
@@ -2151,6 +2227,9 @@ def build_parser():
     s.add_argument("--timeout", type=int, default=60, help="逾時分鐘數（預設 60）")
     s.add_argument("--no-sandbox-env", action="store_true",
                    help="不帶沙箱環境變數設定（-c shell_environment_policy／node_repl）；除錯用，回到 0.2.1 行為")
+    s.add_argument("--permissions", metavar="名稱",
+                   help="用這個 Codex 權限設定檔送審（-c default_permissions，不帶 -s）；"
+                        "預設：Codex 設定檔有 default_permissions 就用它，沒有就 -s workspace-write")
     s.add_argument("--codex", help="codex 執行檔（預設 PATH 上的 codex）")
     s = sub.add_parser("hook", help="hook 進入點"); common(s); s.add_argument("event", choices=["session-start", "stop"]); s.add_argument("--agent", default="claude")
     s = sub.add_parser("pack", help="打離線 zip"); s.add_argument("--out"); s.add_argument("--source")

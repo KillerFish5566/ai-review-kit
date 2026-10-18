@@ -74,7 +74,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 | `doctor [--json]` | 唯讀列出送審前還缺什麼：git、Codex 在不在 PATH、有沒有登入（先確認這版 codex 有 `login status` 才查，只查不登入、不印帳號；沒有就請你自己確認）、node_repl 有沒有設定、gitleaks／pip-audit（含專案 `.venv`）、送審會用哪個實體 Python；已安裝專案另列初始化狀態與 `config.md` 第 6 節未解幾項。只提醒，exit 0 |
 | `restore --yes` | 還原最近一次安裝／更新前的狀態（先列清單）；可逐次往前還原 |
 | `relink [--python "py -3"]` | 換電腦後重寫 hook 的直譯器、重建 `local.json` |
-| `codex-review [--detach] [--print]` | 在專案裡執行：用工作區沙箱啟動 Codex 審查最新交接，紀錄寫 `.ai-review/.cache/codex-<H>.log`，結束寫 `.done`；找不到 codex 時 exit 3 並提示手動退路。用 `-c` 把 `AI_REVIEW_PYTHON`、`SystemDrive` 等環境變數帶進沙箱（只對這次有效，不改 Codex 設定檔；`--print` 列出全部）；審完比對工作區，審查期間多出或被改的檔會警告並寫進 `.done`，不自動刪 |
+| `codex-review [--detach] [--print] [--permissions <名稱>]` | 在專案裡執行：用沙箱啟動 Codex 審查最新交接（Codex 設定檔有 `default_permissions` 權限設定檔就用它、不帶 `-s`，禁止讀取清單才會生效；沒有就 `-s workspace-write`），紀錄寫 `.ai-review/.cache/codex-<H>.log`，結束寫 `.done`；找不到 codex 時 exit 3 並提示手動退路。用 `-c` 把 `AI_REVIEW_PYTHON`、`SystemDrive` 等環境變數帶進沙箱（只對這次有效，不改 Codex 設定檔；`--print` 列出全部）；審完比對工作區，審查期間多出或被改的檔會警告並寫進 `.done`，不自動刪 |
 | `ignore-check [--json]` | 唯讀檢查 `.gitignore` 有沒有排除標準機密清單（`.env`、金鑰與憑證、`.claude/projects/` 對話逐字稿、`*.jsonl`、`memory/` 等 15 條），每條用多個代表路徑（典型檔名、萬用字元的其他變體、子資料夾裡的同名檔）交給 git 判斷，只排除一部分的列「只排除了一部分」並舉例；並列出已被 git 追蹤、但符合清單的檔（只列路徑、不印內容）。`/safety-setup` 盤點時會跑，缺的記進 `config.md` 第 6 節。只提醒、不是關卡，**不會改 `.gitignore`**；缺漏也 exit 0。本專案是正常資料的條目（例如題庫 `*.jsonl`）在 `config.md` 的 ```` ```ignore-ok ```` 區塊記「條目 \| 日期 \| 理由」，之後不再列為缺漏 |
 | `pack` | 打離線 zip 到 `dist/` |
 | `check-update --url <VERSION 檔網址>` | 只查版本號，不自動更新；沒網路就如實說「未檢查更新」 |
@@ -111,6 +111,7 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 - `codex-review` 依賴本機的 Codex 登入與額度；額度不足時不會有審查報告，要照 `config.md` 第 6 節記下哪份交接尚未審。
 - Windows 上 Codex 的 shell 工具起不來時（沙箱「setup refresh had errors」），Codex 會改用 node_repl 工具跑命令；kit 對 node_repl 補的放行名單（`NODE_REPL_UNTRUSTED_ENV_ALLOWLIST`）取自本機 node_repl 執行檔內的程式碼，不是官方文件，Codex 改版可能失效。失效時審後比對會警告；`--no-sandbox-env` 可退回不帶設定。
 - Windows 上 Codex 沙箱裡 gitleaks 可能起不來（啟動被拒，spawn EPERM；2026-10-12 實測，用完整路徑也一樣）。這時審查 AI 沒有自己的機密掃描結果，只有開發端交接時跑的那一次；審查報告會註明「沒有獨立機密掃描」。
+- Windows 上用 Codex 權限設定檔（mxc 沙箱，Codex 0.162.1，2026-10-18 實測）：禁止清單只擋「讀檔案內容」，不擋「列出資料夾」——被禁的資料夾裡有哪些檔名、子資料夾名，審查 AI 仍看得到。
 - 指紋在 CI 與本機可能因 CRLF 正規化設定不同而不一致（`core.autocrlf` 混用時）；遇到就以本機為準並在 CI 停用 gate。
 
 ## 驗證
@@ -118,4 +119,4 @@ py -3 <套件路徑>/tools/kit.py install --target <專案根目錄>
 ```
 py -3 tools/tests/test_kit.py
 ```
-在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、預覽列出實裝會寫的每一個檔、指紋不寫進專案 git 物件庫、`codex-review` 的命令形狀／環境／拒絕條件／帶進沙箱的 `-c` 設定／審後多出檔案的警告（假 codex）、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update、`ignore-check`（全缺／全有／部分缺／否定規則／只在本機排除／已追蹤檔只列路徑／標記不排除後不再列／唯讀／非 git）、「已初始化」要 meta＋檢查命令、審後看得到 .gitignore 排除位置多出的東西、`state --no-write` 不寫任何檔、第 6 節狀態欄新舊格式、`doctor`（假 codex／假 PATH，不觸發登入、唯讀）、`state.json` 不進版控（只提醒、不動 index）。測試資料夾不會自動刪除。
+在暫存資料夾建立多個測試專案，覆蓋：新專案安裝、既有 CLAUDE.md／AGENTS.md／settings.json 保留、重複安裝不重複插入、預覽列出實裝會寫的每一個檔、指紋不寫進專案 git 物件庫、`codex-review` 的命令形狀／環境／拒絕條件／帶進沙箱的 `-c` 設定／權限設定檔（有 `default_permissions` 時不帶 `-s`、拒絕 danger 類名稱）／審後多出檔案的警告（假 codex）、更新衝突不覆蓋、還原、程式變更使審查過期、hook 不迴圈不重複、檢查命令結果分明、離線 zip 安裝、非 git 專案、無網路時的 check-update、`ignore-check`（全缺／全有／部分缺／否定規則／只在本機排除／已追蹤檔只列路徑／標記不排除後不再列／唯讀／非 git）、「已初始化」要 meta＋檢查命令、審後看得到 .gitignore 排除位置多出的東西、`state --no-write` 不寫任何檔、第 6 節狀態欄新舊格式、`doctor`（假 codex／假 PATH，不觸發登入、唯讀）、`state.json` 不進版控（只提醒、不動 index）。測試資料夾不會自動刪除。
