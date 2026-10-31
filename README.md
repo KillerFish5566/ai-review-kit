@@ -9,7 +9,7 @@ The kit contains only methods, templates and tools. It contains **no project cod
 - Python 3.9+, standard library only. Works with git (and, with fewer features, without it).
 - Installs per project; each project carries its own copy, so it does not depend on a central path.
 - Hooks and skills for two hosts: Claude Code (`.claude/`) and Codex (`.codex/`, `.agents/skills/`).
-- 169 automated checks (`tools/tests/test_kit.py`).
+- 383 automated checks (`tools/tests/test_kit.py`).
 
 > **Language note:** the specs, skills, templates, docs and the tool's messages are written in **Traditional Chinese**, because that is the author's working language. Command names and options are English, and this README is in English. Translations are welcome.
 
@@ -54,7 +54,7 @@ ai-review-kit/
 ├ claude/agents/   independent-reviewer (isolated Claude reviewer subagent, installed to the project's .claude/agents/)
 ├ codex/skills/    independent-review (Codex skill, installed to the project's .agents/skills/)
 ├ tools/kit.py     install / update / status / restore / pack, plus snapshot / checks / state / gate / hooks inside a project
-├ tools/tests/     automated tests (temporary projects, 169 checks)
+├ tools/tests/     automated tests (temporary projects, 383 checks)
 └ docs/            codex-start.md (hand over to Codex), daily-usage.md, offline-setup.md (using it on a machine without GitHub access)
 ```
 

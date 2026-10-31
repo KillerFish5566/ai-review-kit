@@ -3,7 +3,22 @@
 版本規則：patch＝修 bug 不改行為；minor＝加功能且舊專案資料相容；major＝專案資料需轉換或使用方式改變。
 每次發版：改 `VERSION`、在這裡加一段、`kit.py pack` 重打離線包。
 
-## 未發版
+## 0.5.0 — 2026-11-01
+
+新功能：隔離 Claude 審查員（Codex Plus 額度不夠一天跑一輪審查＋複查，2026-10-31 實測）。預設審查員改成另開的 Claude 子代理，報告與狀態一律標「非 Codex 審查」；單次改動超過 `big_change_files`（預設 10）個檔、或帶 `--codex`、或發版前，才送 Codex。舊專案資料相容（舊 R 報告照舊有效；`reviewer: claude`、`claude-code` 照舊不算獨立審查）。
+
+- 審查員子代理定義 `claude/agents/independent-reviewer.md` → 安裝到 `.claude/agents/independent-reviewer.md`：`omitClaudeMd: true`、不帶記憶、工具白名單、PreToolUse 守門 hook。第一次裝好要重開 Claude Code 才載入。
+- `kit.py hook review-guard`（守門）：寫檔只准 `.ai-review/reviews/R-*.md`；指令只准 git 唯讀子命令（擋 `--output`、`--ext-diff`、`-c` 等）、本專案 kit.py 的 `verify`／`new-id R`／`state --no-write`／`checks --run`（不准帶 `--handoff`）、`config.md` 第 4 節命令逐字相同；擋串接與轉向；其他工具一律擋。判斷不了一律擋（與 session-start／stop「永不阻擋」相反）。只管 Claude 工具層；Python 子程序寫檔靠審後比對抓。
+- `kit.py claude-review --begin <H>`／`--end <H> --model <別名>`（`--print` 只印）：拒絕條件、`.running`、審前審後比對、`.done`（加 `reviewer`、`reviewer_model`、`isolation`）與 codex-review 共用同一套函式；codex-review 行為與輸出不變。
+- R 報告新值 `reviewer: claude-isolated`，新欄 `reviewer_model`、`reviewer_isolation`；`status`、`state`、SessionStart 在結論後加「（非 Codex 審查）」。
+- `kit.py gate --require-reviewer codex`：最新有效審查不是 Codex 就不放行（發版前用）。
+- `kit.py reviewer-agent --session-root <資料夾> [--out <檔>]`：巢狀專案（對話開在專案上層資料夾時，Claude Code 只從對話資料夾往上找 `.claude/agents/`，找不到專案裡的審查員）用，產生改好路徑的審查員定義。
+- `doctor` 多一項 `claude_agent`；`status` 列出 agent 檔；`pack` 補收 `LICENSE`、`README.zh-TW.md`。
+- `/review-ready` 第 10～12 步：選審查員（改動檔數取 snapshot 與 `git diff --stat`〔排除 `.ai-review/`〕較大者）、Claude 路線派工固定格式、不能再派子代理的子代理只交接不派；`/review-fix`、規範、範本、`workflow.md` 硬規則 2、文件同步改成「獨立審查員」。`templates/config.md` 第 5 節加 `big_change_files`、「發版前 gate 需 Codex 審查」（舊專案用 `/safety-setup --refresh` 補）。
+- 修正輪（2026-11-01 獨立審查＋真 Claude Code 實跑）：守門放行 SubagentHandback；`onFailure: block`；審查員第 0 步守門自檢；守門心跳與 `guard_calls`、守門未生效標記；只收這次新寫的報告、舊報告被改或新報告 reviewer 不對 → exit 1；`--end` 擋非法 verdict；Codex 判需修正不被隔離 Claude 推翻；`gate --require-reviewer codex` 綁 codex-review 紀錄與守門寫檔紀錄；`reviewer-agent --python`；doctor 查 py 與 Claude Code ≥ 2.1.271。
+- 測試 181 → 383 項（T30 claude-review、T31 review-guard、T32 reviewer-agent；T1／T9／T16／T26 加 agent 檔項；修正輪補測）。
+
+以下三項原列「未發版」，隨 0.5.0 一起發：
 
 文件：`docs/codex-start.md` 新增「只在專案資料夾開 Codex」一節，README「限制」加一條。2026-10-11 實測：在使用者資料夾開過 Codex 後，Windows 版沙箱群組對整個資料夾樹（含 Claude Code 設定夾、其他專案）留下「可修改」權限並記進 `~/.codex/config.toml` 信任清單，關掉後仍在。`codex-review` 一律 `-C <專案>`，不受影響。程式沒改。
 
