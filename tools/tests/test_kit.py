@@ -102,9 +102,11 @@ def main():
             ".claude/skills/safety-setup/SKILL.md", ".claude/skills/review-ready/SKILL.md",
             ".claude/skills/review-fix/SKILL.md", ".agents/skills/independent-review/SKILL.md",
             "CLAUDE.md", "AGENTS.md", ".claude/settings.json", ".codex/hooks.json", ".gitignore",
-            ".ai-review/kit-version.json", ".ai-review/state.json", ".ai-review/handoffs/.gitkeep"]
+            ".ai-review/kit-version.json", ".ai-review/state.json", ".ai-review/handoffs/.gitkeep",
+            ".claude/agents/independent-reviewer.md"]
     missing = [m for m in must if not (p1 / m).exists()]
     check("T1 所有檔案存在", not missing, str(missing))
+    check("T1 安裝完成訊息提醒第一次裝 agent 檔要重開 Claude Code", "第一次裝 agent 檔要重開 Claude Code" in out, out[-500:])
     s = json.loads(read(p1 / ".claude/settings.json"))
     ours = lambda ev: [g for g in s.get("hooks", {}).get(ev, []) if ".ai-review/kit/kit.py" in json.dumps(g).replace("\\\\", "/")]
     check("T1 settings.json 有 SessionStart 與 Stop 各一條", len(ours("SessionStart")) == 1 and len(ours("Stop")) == 1)
@@ -294,6 +296,11 @@ def main():
     rc, out, err = kit("pack", "--out", str(root / "dist"))
     zips = list((root / "dist").glob("ai-review-kit-*.zip"))
     check("T9 pack 產生 zip", rc == 0 and len(zips) == 1, err[-300:])
+    import zipfile
+    znames = set(zipfile.ZipFile(zips[0]).namelist()) if zips else set()
+    check("T9 zip 收了 LICENSE、README.zh-TW.md 與審查員子代理定義（0.5.0）",
+          {"ai-review-kit/LICENSE", "ai-review-kit/README.zh-TW.md", "ai-review-kit/claude/agents/independent-reviewer.md"} <= znames,
+          str(sorted(znames))[:400])
     p4 = new_git_project(root, "p4-zip")
     rc, out, err = kit("install", "--target", str(p4), "--source", str(zips[0]))
     check("T9 從 zip 安裝成功", rc == 0 and (p4 / ".ai-review/kit/workflow.md").exists(), err[-300:])
@@ -389,10 +396,13 @@ def main():
     touched = {p for p in touched if not p.startswith(".ai-review/.backup/")}   # 備份是安裝的副產品，不是變更對象
     check("T16 實裝寫入的檔全部出現在預覽", touched <= listed, str(sorted(touched - listed)))
     for key in (".claude/settings.json", ".codex/hooks.json", ".gitignore", ".ai-review/local.json",
-                ".ai-review/kit-version.json", ".ai-review/state.json", ".ai-review/reviews/.gitkeep"):
+                ".ai-review/kit-version.json", ".ai-review/state.json", ".ai-review/reviews/.gitkeep",
+                ".claude/agents/independent-reviewer.md"):
         if key not in listed:
             check(f"T16 預覽列出 {key}", False, out[-600:])
     check("T16 預覽附 hook 內容差異", "差異：.claude/settings.json" in out, out[-600:])
+    check("T16 預覽列出審查員子代理定義並說明含守門 hook", ".claude/agents/independent-reviewer.md" in listed
+          and "子代理定義含守門 hook" in out, out[-600:])
 
     # ---------------- T17 指紋不寫進專案的 git 物件庫（Codex 沙箱不准寫 .git 也能算）（0.2.0）
     p10 = new_git_project(root, "p10-codex-review")
@@ -937,7 +947,44 @@ def main():
     check("T26 唯讀：doctor 跑完專案每個檔位元組都沒變", tree_bytes(p17) == p17_before)
     check("T26 --json 欄位齊全", all(k in d for k in ("target", "items", "project", "note"))
           and {i["key"] for i in d["items"]} == {"git", "codex", "codex_login", "node_repl", "codex_permissions", "gitleaks", "pip_audit",
-                                                    "python"}, str(d)[:300])
+                                                    "python", "claude_agent"}, str(d)[:300])
+    # 守門 hook 的 py 與 claude 版本也要查（RV-8，T-0199 W4）：用只放假 py、假 claude 的 PATH，結果不受跑測試的電腦影響
+    def fake_bin(dirname, claude_ver=None, with_py=True):
+        b = root / dirname
+        b.mkdir(exist_ok=True)
+        if os.name == "nt":
+            if with_py:
+                write(b / "py.cmd", "@echo off\r\n")
+            if claude_ver:
+                write(b / "claude.cmd", f"@echo {claude_ver} (Claude Code)\r\n")
+        else:
+            for name, body in (("py", "#!/bin/sh\n") if with_py else (None, None),
+                               ("claude", f"#!/bin/sh\necho '{claude_ver} (Claude Code)'\n") if claude_ver else (None, None)):
+                if name:
+                    write(b / name, body)
+                    (b / name).chmod(0o755)
+        return str(b)
+
+    rc, d, raw = doc_json(env=dict(ENV, PATH=fake_bin("t26-agentbin", claude_ver="2.1.300")))
+    check("T26 doctor 的 claude_agent：已安裝的子代理定義含 omitClaudeMd 與 review-guard → ✓",
+          item(d, "claude_agent").get("ok") is True, json.dumps(item(d, "claude_agent"), ensure_ascii=False))
+    check("T26 doctor 的 claude_agent：py 找得到、列出 Claude Code 版本與信任／開在專案根的提醒",
+          "py 找得到" in item(d, "claude_agent").get("detail", "") and "2.1.300" in item(d, "claude_agent").get("detail", "")
+          and "信任" in item(d, "claude_agent").get("detail", ""), json.dumps(item(d, "claude_agent"), ensure_ascii=False))
+    rc, d, raw = doc_json(env=dict(ENV, PATH=fake_bin("t26-nopy", claude_ver="2.1.300", with_py=False)))
+    ca = item(d, "claude_agent")
+    check("T26 doctor：agent 檔 command 是 py 但找不到 py → claude_agent ✗，說明用 reviewer-agent --python 或手改 python3（RV-8）",
+          rc == 0 and ca.get("ok") is False and "找不到 py" in ca.get("detail", "") and "reviewer-agent" in ca.get("detail", "")
+          and "python3" in ca.get("detail", ""), json.dumps(ca, ensure_ascii=False))
+    rc, d, raw = doc_json(env=dict(ENV, PATH=fake_bin("t26-oldclaude", claude_ver="2.1.200")))
+    ca = item(d, "claude_agent")
+    check("T26 doctor：claude --version 低於 2.1.271 → claude_agent ✗「太舊」（RV-8）",
+          rc == 0 and ca.get("ok") is False and "太舊" in ca.get("detail", "") and "2.1.271" in ca.get("detail", ""),
+          json.dumps(ca, ensure_ascii=False))
+    rc, d, raw = doc_json(env=dict(ENV, PATH=fake_bin("t26-noclaude")))
+    ca = item(d, "claude_agent")
+    check("T26 doctor：找不到 claude → 版本寫「未知」、不算失敗（RV-8）",
+          rc == 0 and ca.get("ok") is True and "未知" in ca.get("detail", ""), json.dumps(ca, ensure_ascii=False))
 
     # ---------------- T27 state.json 不進版控：.gitignore 補一行、仍被追蹤只提醒不動 index（未發版）
     p19 = new_git_project(root, "p19-state-ignore")
@@ -970,6 +1017,558 @@ def main():
     rc2, ls, _ = git("ls-files", "--error-unmatch", ".ai-review/state.json", cwd=p21)
     check("T27 kit 沒有自己 git rm：state.json 還在 index、index 檔位元組沒變",
           rc2 == 0 and (p21 / ".git/index").read_bytes() == idx_before and (p21 / ".ai-review/state.json").exists())
+
+    # ---------------- T30 claude-review：隔離 Claude 子代理審查的開始與收尾（0.5.0）
+    p26 = new_git_project(root, "p26-claude-review")
+    kit("install", "--target", str(p26))
+    p26kit = p26 / ".ai-review/kit/kit.py"
+    write(p26 / ".ai-review/config.md", read(KIT_ROOT / "templates/config.md").replace(
+        "```checks\nname | command | required\n```",
+        "```checks\nname | command | required\nok | echo ok | yes\nchain | echo a && echo b | no\n```"))
+    cache26 = p26 / ".ai-review/.cache"
+
+    def new_handoff(proj, script, scope):
+        rc, out, err = kit("snapshot", "--json", cwd=proj, script=script)
+        sn = json.loads(out) if rc == 0 else {}
+        hid = sn.get("id", "H-missing")
+        write(proj / f".ai-review/handoffs/{hid}.md", front(hid, "handoff", target=sn.get("target"), snapshot_ref=sn.get("snapshot_ref"),
+                                                             head=sn.get("head"), base=sn.get("base"), recheck_of="", scope=scope))
+        return hid, sn
+
+    def review_file(proj, rid, hid, tgt, reviewer="claude-isolated", verdict="no-blocking-found", model="fable"):
+        kv = dict(handoff=hid, target=tgt, reviewer=reviewer, verdict=verdict, blocking=0)
+        if model:
+            kv.update(reviewer_model=model, reviewer_isolation="subagent;omitClaudeMd;no-memory;review-guard")
+        write(proj / f".ai-review/reviews/{rid}.md", front(rid, "review", **kv))
+
+    H30, sn30 = new_handoff(p26, p26kit, "t30")
+    running30 = cache26 / f"claude-{H30}.running"
+    done30p = cache26 / f"claude-{H30}.done"
+    before = snapshot(p26)
+    rc, out, err = kit("claude-review", "--begin", H30, "--print", cwd=p26, script=p26kit)
+    check("T30 --begin --print：印派工資訊、不寫任何檔", rc == 0 and "可派審查員" in out and H30 in out and snapshot(p26) == before,
+          out[-500:] + err[-300:])
+    rc, out, err = kit("claude-review", "--end", H30, "--model", "fable", cwd=p26, script=p26kit)
+    check("T30 --end 沒有開始紀錄（.running）→ exit 2 並叫先 --begin", rc == 2 and "--begin" in out, out[-300:] + err[-300:])
+    rc, out, err = kit("claude-review", "--begin", H30, cwd=p26, script=p26kit)
+    rj = json.loads(read(running30)) if running30.exists() else {}
+    check("T30 --begin 寫 .running（pid、開始時間、審前清單）",
+          rc == 0 and rj.get("handoff") == H30 and isinstance(rj.get("pid"), int) and rj.get("started")
+          and isinstance(rj.get("before"), dict) and "app.py" in rj["before"], out[-400:] + err[-300:] + json.dumps(rj)[:300])
+    check("T30 --begin 印 H、專案絕對路徑、模型建議（與開發 AI 不同的別名）",
+          H30 in out and p26.resolve().as_posix() in out and "fable" in out and "opus" in out and "不同" in out, out[-600:])
+    check("T30 --begin 印的專案路徑一律正斜線（RV-7：審查員照抄不加引號也不會被 bash 吃掉反斜線）",
+          (os.name != "nt" or str(p26.resolve()) not in out) and f"專案：{p26.resolve().as_posix()}" in out, out[-600:])
+    check("T30 --begin 寫 .running 時一併記下審前報告清單、清空守門心跳紀錄",
+          isinstance(rj.get("reviews_before"), dict) and (cache26 / f"claude-{H30}.guard.jsonl").is_file()
+          and read(cache26 / f"claude-{H30}.guard.jsonl") == "", json.dumps(rj, ensure_ascii=False)[:300])
+    # RV-10：kit 印的派工 prompt 與 review-ready skill 第 11A 步的四行是同一份
+    skill_rr = read(KIT_ROOT / "claude/skills/review-ready/SKILL.md")
+    plines = [l.strip().replace(p26.resolve().as_posix(), "<專案>").replace(H30, "<H-id>") for l in out.splitlines()]
+    pstart = next((i for i, l in enumerate(plines) if l.startswith("專案：")), None)
+    prompt4 = plines[pstart:pstart + 4] if pstart is not None else []
+    check("T30 kit 印的四行 prompt 與 review-ready skill 的四行逐字相同（RV-10）",
+          len(prompt4) == 4 and prompt4[1] == "交接：<H-id>" and prompt4[2] == "reviewer_model：<別名>"
+          and all(("\n      " + l + "\n") in skill_rr for l in prompt4), json.dumps(prompt4, ensure_ascii=False))
+    rc, out, err = kit("claude-review", "--begin", H30, cwd=p26, script=p26kit)
+    check("T30 審查還在進行（.running 沒逾時）再 --begin → exit 1、提示 --again", rc == 1 and "--again" in out, out[-300:])
+    rc, out, err = kit("claude-review", "--end", H30, cwd=p26, script=p26kit)
+    check("T30 --end 沒帶 --model → exit 2", rc == 2 and "--model" in out, out[-300:])
+    rc, out, err = kit("claude-review", "--end", H30, "--model", "a b", cwd=p26, script=p26kit)
+    check("T30 --model 別名不合法 → exit 2", rc == 2 and "不接受" in out, out[-300:])
+    review_file(p26, "R-20990102-0001", H30, sn30["target"], reviewer="claude", model=None)
+    rc, out, err = kit("state", "--json", cwd=p26, script=p26kit)
+    st = json.loads(out) if rc == 0 else {}
+    check("T30 reviewer: claude 仍不算獨立審查", st.get("status") == "pending-review"
+          and any("不算獨立審查" in n for n in st.get("notes", [])), out[-400:])
+    check("T30 待審的未結案寫兩條路線（claude-review 與 codex-review）",
+          any("claude-review --begin" in o and "codex-review" in o and "$independent-review" in o for o in st.get("open_items", [])),
+          json.dumps(st.get("open_items"), ensure_ascii=False))
+    rc, out, err = kit("claude-review", "--end", H30, "--model", "fable", cwd=p26, script=p26kit)
+    check("T30 找不到隔離 Claude 的 R → exit 1、提示看子代理回報、開始紀錄留著（補好 R 可再 --end）",
+          rc == 1 and "子代理" in out and "R-20990102-0001" in out and running30.exists() and not done30p.exists(), out[-500:])
+    check("T30 審查期間新寫的 R 的 reviewer 不是 claude-isolated → 點名（RV-2）",
+          "R-20990102-0001.md（reviewer claude）" in out and "reviewer 不是 claude-isolated" in out, out[-500:])
+    # 審查員寫錯 reviewer → 重派（--again 重記審前清單：R-0001 變成審前就有的報告）
+    rc, out, err = kit("claude-review", "--begin", H30, "--again", cwd=p26, script=p26kit)
+    check("T30 --begin --again 重記審前清單（剛才那份 R 算審前就有）", rc == 0 and "R-20990102-0001.md" in
+          json.loads(read(running30)).get("reviews_before", {}), out[-300:])
+
+    def guard_call(proj_kit, payload):
+        return kit("hook", "review-guard", script=proj_kit, input_text=json.dumps(payload).encode("utf-8"), cwd=root)
+
+    # 審查員第 0 步的守門自檢（echo guard-canary 應被擋）→ 守門心跳 1 筆
+    rc, out, err = guard_call(p26kit, {"tool_name": "Bash", "tool_input": {"command": "echo guard-canary"}, "cwd": str(p26)})
+    glog30 = cache26 / f"claude-{H30}.guard.jsonl"
+    gl = [json.loads(x) for x in read(glog30).splitlines() if x.strip()] if glog30.exists() else []
+    check("T30 守門自檢 echo guard-canary 被擋（exit 2），守門心跳記一行：時間、工具名、擋下，不記指令（RV-1）",
+          rc == 2 and len(gl) == 1 and gl[0].get("tool") == "Bash" and gl[0].get("decision") == "block" and gl[0].get("time")
+          and "guard-canary" not in read(glog30), read(glog30) if glog30.exists() else "沒有心跳檔")
+    # 2026-11-01 真 Claude Code 實跑：審查員寫了 verdict: blocked → --end 不收尾、exit 1、開始紀錄留著
+    review_file(p26, "R-20990102-0002", H30, sn30["target"], verdict="blocked")
+    rc, out, err = kit("claude-review", "--end", H30, "--model", "fable", cwd=p26, script=p26kit)
+    check("T30 新 R 的 verdict 不是三種合法值 → exit 1、不寫 .done、開始紀錄留著（補好可再 --end）",
+          rc == 1 and "blocked" in out and not done30p.exists() and running30.exists(), out[-400:])
+    review_file(p26, "R-20990102-0002", H30, sn30["target"])
+    before = snapshot(p26)
+    rc, out, err = kit("claude-review", "--end", H30, "--model", "fable", "--print", cwd=p26, script=p26kit)
+    check("T30 --end --print：找到 R、只印不寫", rc == 0 and "R-20990102-0002" in out and snapshot(p26) == before and running30.exists(),
+          out[-400:])
+    rc, out, err = kit("claude-review", "--end", H30, "--model", "fable", cwd=p26, script=p26kit)
+    dj = json.loads(read(done30p)) if done30p.exists() else {}
+    check("T30 --end 寫 .done：reviewer claude-isolated、reviewer_model、isolation、審查編號與結論",
+          rc == 0 and dj.get("reviewer") == "claude-isolated" and dj.get("reviewer_model") == "fable"
+          and "review-guard" in (dj.get("isolation") or "") and dj.get("review") == "R-20990102-0002"
+          and dj.get("verdict") == "no-blocking-found", out[-500:] + json.dumps(dj, ensure_ascii=False)[:500])
+    check("T30 .done 欄位＝codex 的 .done 欄位（T18，不變）＋reviewer、reviewer_model、isolation、guard_calls",
+          set(done) == {"handoff", "exit", "started", "finished", "review", "verdict", "sandbox_env", "permissions"}
+          and set(dj) == set(done) | {"reviewer", "reviewer_model", "isolation", "guard_calls"}, str(sorted(done)) + " / " + str(sorted(dj)))
+    check("T30 有守門心跳 → .done 記 guard_calls 1、isolation 照報告（review-guard），不出守門警告",
+          dj.get("guard_calls") == 1 and dj.get("isolation") == "subagent;omitClaudeMd;no-memory;review-guard"
+          and "守門 hook 沒有執行紀錄" not in out, json.dumps(dj, ensure_ascii=False)[:300] + out[-300:])
+    check("T30 乾淨的審查：.done 沒有警告、開始紀錄已清", "warnings" not in dj and "workspace_changes" not in dj and not running30.exists(),
+          json.dumps(dj, ensure_ascii=False)[:400])
+    st = json.loads(read(p26 / ".ai-review/state.json"))
+    check("T30 狀態 no-blocking-found；state.json 的 review 帶 reviewer_model、reviewer_isolation",
+          st["status"] == "no-blocking-found" and (st.get("review") or {}).get("reviewer_model") == "fable"
+          and "review-guard" in ((st.get("review") or {}).get("reviewer_isolation") or ""), json.dumps(st, ensure_ascii=False)[:500])
+    check("T30 --end 輸出 R 編號、結論並標「非 Codex 審查」", "R-20990102-0002" in out and "no-blocking-found（非 Codex 審查）" in out, out[-500:])
+    rc, out, err = kit("status", cwd=p26, script=p26kit)
+    check("T30 status 顯示「非 Codex 審查」、模型與子代理已安裝",
+          rc == 0 and "結論 no-blocking-found（非 Codex 審查）" in out and "模型 fable" in out and "independent-reviewer ✓" in out, out[-600:])
+    rc, out, err = kit("status", "--json", cwd=p26, script=p26kit)
+    check("T30 status --json 有 claude_agent", rc == 0 and json.loads(out).get("claude_agent") is True, out[-300:])
+    rc, out, err = kit("state", cwd=p26, script=p26kit)
+    check("T30 state（人看的輸出）結論後標「非 Codex 審查」", rc == 0 and "no-blocking-found（非 Codex 審查）" in out, out[-400:])
+    rc, out, err = kit("hook", "session-start", cwd=p26, script=p26kit, input_text=b"{}")
+    check("T30 SessionStart hook 結論後標「非 Codex 審查」", rc == 0 and "no-blocking-found（非 Codex 審查）" in out, out[-500:])
+    rc, out, err = kit("gate", cwd=p26, script=p26kit)
+    check("T30 gate 不帶參數：隔離 Claude 審查照常通過（行為不變）", rc == 0, out[-400:])
+    rc, out, err = kit("gate", "--require-reviewer", "codex", cwd=p26, script=p26kit)
+    check("T30 gate --require-reviewer codex：claude-isolated → exit 1「發版前需 Codex 審查」", rc == 1 and "發版前需 Codex 審查" in out,
+          out[-400:])
+    review_file(p26, "R-20990102-0003", H30, sn30["target"], reviewer="codex", model=None)
+    rc, out, err = kit("gate", "--require-reviewer", "codex", cwd=p26, script=p26kit)
+    check("T30 gate --require-reviewer codex：沒有 codex-review 紀錄、也不在守門寫檔紀錄（手動開 Codex 審）→ exit 0＋提示依檔頭採信",
+          rc == 0 and "未見 codex-review 執行紀錄（手動開 Codex 審查），依報告檔頭採信；守門沒生效時無法分辨" in out
+          and "通過條件成立" in out, out[-500:])
+    write(cache26 / f"codex-{H30}.done", json.dumps({"handoff": H30, "exit": 0, "review": "R-20990102-0002"}))
+    rc, out, err = kit("gate", "--require-reviewer", "codex", cwd=p26, script=p26kit)
+    check("T30 gate --require-reviewer codex：codex 執行紀錄指向別份報告 → exit 1", rc == 1 and "R-20990102-0002" in out
+          and f"codex-{H30}.done" in out, out[-400:])
+    write(cache26 / f"codex-{H30}.done", json.dumps({"handoff": H30, "exit": 0, "review": "R-20990102-0003"}))
+    rc, out, err = kit("gate", "--require-reviewer", "codex", cwd=p26, script=p26kit)
+    check("T30 gate --require-reviewer codex：最新有效審查是 codex → exit 0", rc == 0 and "通過條件成立" in out, out[-400:])
+    check("T30 gate --require-reviewer codex：codex-review 紀錄指向這份 → 不印「未見執行紀錄」", "未見 codex-review" not in out, out[-400:])
+    check("T30 gate 印出這份交接的審查歷程一行（RV-5）",
+          f"審查歷程（交接 {H30}）" in out and "R-20990102-0001 claude" in out and "R-20990102-0003 codex no-blocking-found（採用）" in out,
+          out[-600:])
+    rc, out, err = kit("state", cwd=p26, script=p26kit)
+    check("T30 Codex 審查的輸出不加「非 Codex 審查」", rc == 0 and "結論 no-blocking-found  審查者 codex" in out and "非 Codex" not in out,
+          out[-400:])
+    # 第二輪：審查期間多出檔 → 警告、不刪；R 的 reviewer_model 與 --model 不同 → 提醒
+    H30b, sn30b = new_handoff(p26, p26kit, "t30b")
+    rc, out, err = kit("claude-review", "--begin", H30b, cwd=p26, script=p26kit)
+    check("T30 第二輪 --begin exit 0", rc == 0, out[-300:])
+    write(p26 / "stray_by_reviewer.txt", "x\n")
+    review_file(p26, "R-20990102-0004", H30b, sn30b["target"], model="opus")
+    rc, out, err = kit("claude-review", "--end", H30b, "--model", "fable", cwd=p26, script=p26kit)
+    dj2p = cache26 / f"claude-{H30b}.done"
+    dj2 = json.loads(read(dj2p)) if dj2p.exists() else {}
+    check("T30 審查期間多出檔 → 輸出警告並列出路徑、.done 記 workspace_changes 與指紋漂移",
+          rc == 0 and "stray_by_reviewer.txt" in out and "不會自動刪" in out
+          and "stray_by_reviewer.txt" in (dj2.get("workspace_changes") or {}).get("added", []) and dj2.get("fingerprint_drift") is True
+          and "claude-review --begin" in out, out[-800:] + json.dumps(dj2, ensure_ascii=False)[:500])
+    check("T30 多出來的檔沒有被刪", (p26 / "stray_by_reviewer.txt").is_file())
+    check("T30 R 的 reviewer_model 與 --model 不同 → 提醒，.done 記 --model 的值",
+          "與 --model fable 不同" in out and dj2.get("reviewer_model") == "fable", out[-600:])
+
+    # ---------------- T31 review-guard：審查員子代理的守門 hook（0.5.0）
+    pj = str(p26.resolve())
+    rv = p26.resolve() / ".ai-review" / "reviews"
+    p26kit_s = str(p26kit.resolve())
+    p10kit_s = str(p10kit.resolve())
+
+    def guard(payload=None, raw=None, script=p26kit, cwd=root):
+        data = raw if raw is not None else json.dumps(payload).encode("utf-8")
+        return kit("hook", "review-guard", cwd=cwd, script=script, input_text=data)
+
+    def g_edit(path, tool="Edit", hcwd=None):
+        return guard({"tool_name": tool, "tool_input": {"file_path": str(path), "old_string": "a", "new_string": "b", "content": "x"},
+                      "cwd": hcwd or str(root), "agent_type": "independent-reviewer", "hook_event_name": "PreToolUse"})
+
+    def g_bash(cmd, hcwd=None):
+        return guard({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": hcwd or str(root),
+                      "agent_type": "independent-reviewer", "hook_event_name": "PreToolUse"})
+
+    def expect(name, res, code):
+        rc, out, err = res
+        check(f"T31 {name} → exit {code}", rc == code, f"rc={rc} {out[-200:]} {err[-300:]}")
+
+    # 守門要有開審紀錄才准寫（RV-2）：先開一輪審查（新交接 H31）
+    H31, sn31 = new_handoff(p26, p26kit, "t31")
+    rc, out, err = kit("claude-review", "--begin", H31, cwd=p26, script=p26kit)
+    check("T31 前置：claude-review --begin（守門要有開審紀錄才准寫）", rc == 0, out[-300:])
+    glog31 = cache26 / f"claude-{H31}.guard.jsonl"
+    # 檔案工具
+    expect("Write 到 reviews/R-*.md 放行（hook 程序 cwd 在專案外，也找得到專案）", g_edit(rv / "R-20990103-0001.md", "Write"), 0)
+    expect("Edit 到 reviews/R-*.md 放行", g_edit(rv / "R-20990103-0001.md"), 0)
+    expect("MultiEdit 到 reviews/R-*.md 放行", g_edit(rv / "R-20990103-0001.md", "MultiEdit"), 0)
+    expect("Edit 到 reviews 外（app.py）擋", g_edit(p26 / "app.py"), 2)
+    expect("Write 到 handoffs 擋", g_edit(p26 / f".ai-review/handoffs/{H30}.md", "Write"), 2)
+    expect("Edit 路徑含 .. 跳出 reviews 擋", g_edit(str(rv) + "/../handoffs/x.md"), 2)
+    expect("Edit 路徑含 ..（繞一圈回 reviews）也擋", g_edit(str(rv) + "/../reviews/R-20990103-0001.md"), 2)
+    expect("reviews 底下不是 R-*.md（notes.md）擋", g_edit(rv / "notes.md", "Write"), 2)
+    expect("reviews 底下子資料夾擋", g_edit(rv / "sub" / "R-20990103-0001.md", "Write"), 2)
+    expect("檔名帶 :（Windows 替代資料流）擋", g_edit(str(rv / "R-20990103-0001.md") + ":evil", "Write"), 2)
+    expect("別專案的 reviews/R-*.md 擋", g_edit(p10.resolve() / ".ai-review/reviews/R-20990103-0001.md", "Write"), 2)
+    expect("相對路徑以 hook 的 cwd 解析：cwd＝專案 → reviews 內放行", g_edit(".ai-review/reviews/R-20990103-0001.md", "Write", hcwd=pj), 0)
+    expect("相對路徑以 hook 的 cwd 解析：cwd＝上層 → 不在 reviews 擋", g_edit(".ai-review/reviews/R-20990103-0001.md", "Write"), 2)
+    if os.name == "nt":
+        expect("Windows 不分大小寫：大寫路徑到 reviews 放行", g_edit(str(rv).upper() + "\\R-20990103-0001.md", "Write"), 0)
+        expect("斜線方向：正斜線路徑到 reviews 放行", g_edit(str(rv).replace("\\", "/") + "/R-20990103-0001.md", "Write"), 0)
+        msys = "/" + pj[0].lower() + pj[2:].replace("\\", "/") + "/.ai-review/reviews/R-20990103-0001.md"
+        expect("Git Bash 風格 /c/... 路徑到 reviews 放行", g_edit(msys, "Write"), 0)
+        expect("大寫路徑到 reviews 外仍擋", g_edit(str(p26 / "app.py").upper()), 2)
+    link = rv / "R-20990103-0099.md"
+    try:
+        os.symlink(str(p26 / "app.py"), str(link))
+        linked = True
+    except (OSError, NotImplementedError):
+        linked = False
+        print("（T31 這台電腦不能建符號連結，略過「符號連結跳出」測試）")
+    if linked:
+        expect("reviews 裡的符號連結指到 reviews 外擋", g_edit(link, "Write"), 2)
+    expect("NotebookEdit 擋", guard({"tool_name": "NotebookEdit", "tool_input": {"notebook_path": str(rv / "R-1.md")}, "cwd": str(root)}), 2)
+    for t in ("Read", "Grep", "Glob"):
+        expect(f"{t} 放行", guard({"tool_name": t, "tool_input": {"file_path": str(p26 / "app.py"), "pattern": "x"}, "cwd": str(root)}), 0)
+    # Bash：git
+    expect("git diff 放行", g_bash("git diff"), 0)
+    expect("git 多空白（git  diff   HEAD）放行", g_bash("git  diff   HEAD"), 0)
+    expect("git --no-pager log --oneline -5 放行", g_bash("git --no-pager log --oneline -5"), 0)
+    expect("git -C \"本專案\" diff 放行", g_bash(f'git -C "{pj}" diff HEAD'), 0)
+    expect("git -C 相對路徑（以 hook cwd 解析到本專案）放行", g_bash("git -C p26-claude-review status"), 0)
+    expect("git show／ls-files／rev-parse／cat-file 放行",
+           (max(g_bash(c)[0] for c in ("git show HEAD --stat", "git ls-files", "git rev-parse HEAD", "git cat-file -p HEAD")), "", ""), 0)
+    expect("git -C 別專案擋", g_bash(f'git -C "{p10.resolve()}" diff'), 2)
+    expect("git diff --output=x 擋", g_bash("git diff --output=x.txt"), 2)
+    expect("git diff --outp=x（縮寫）擋", g_bash("git diff --outp=x.txt"), 2)
+    expect("git diff --output x（分開寫）擋", g_bash("git diff --output x.txt"), 2)
+    expect("git log --ext-diff 擋", g_bash("git log --ext-diff"), 2)
+    expect("git show --textconv 擋", g_bash("git show --textconv HEAD"), 2)
+    expect("git -c core.pager=x diff 擋", g_bash("git -c core.pager=evil diff"), 2)
+    expect("git --exec-path=x diff 擋", g_bash("git --exec-path=/tmp diff"), 2)
+    expect("git diff && del x 擋", g_bash("git diff && del x"), 2)
+    expect("git diff; rm x 擋", g_bash("git diff; rm x"), 2)
+    expect("git diff | tee x 擋", g_bash("git diff | tee x"), 2)
+    expect("git diff > x 擋", g_bash("git diff > x"), 2)
+    expect("git log $(rm x) 擋", g_bash("git log $(rm x)"), 2)
+    expect("git log `rm x` 擋", g_bash("git log `rm x`"), 2)
+    expect("git diff 換行 rm x 擋", g_bash("git diff\nrm x"), 2)
+    expect("git $'-c' x=y diff（ANSI 引號偷渡 -c）擋", g_bash("git $'-c' x=y diff"), 2)
+    expect("git {diff,--output=x}（大括號展開）擋", g_bash("git {diff,--output=x}"), 2)
+    expect("git diff *（萬用字元）擋", g_bash("git diff *"), 2)
+    expect("GIT_EXTERNAL_DIFF=x git diff（前置環境變數）擋", g_bash("GIT_EXTERNAL_DIFF=evil git diff"), 2)
+    expect("git push 擋", g_bash("git push"), 2)
+    expect("git checkout -- app.py 擋", g_bash("git checkout -- app.py"), 2)
+    expect("git config 擋", g_bash("git config core.pager evil"), 2)
+    expect("git 別名或白名單外子命令（git difftool）擋", g_bash("git difftool"), 2)
+    expect("'git' diff（引號包命令名仍是 git）放行", g_bash("'git' diff"), 0)
+    # Bash：kit.py
+    expect("py -3 本專案 kit.py verify 放行", g_bash(f'py -3 "{p26kit_s}" verify'), 0)
+    expect("kit.py verify --handoff H --target 本專案 放行", g_bash(f'py -3 "{p26kit_s}" verify --handoff {H30} --target "{pj}"'), 0)
+    expect("kit.py new-id R 放行", g_bash(f'py -3 "{p26kit_s}" new-id R'), 0)
+    expect("kit.py new-id H 擋", g_bash(f'py -3 "{p26kit_s}" new-id H'), 2)
+    expect("kit.py state --no-write --json 放行", g_bash(f'py -3 "{p26kit_s}" state --no-write --json'), 0)
+    expect("kit.py state（會寫 state.json）擋", g_bash(f'py -3 "{p26kit_s}" state --json'), 2)
+    expect("kit.py checks --run 放行", g_bash(f'py -3 "{p26kit_s}" checks --run --target "{pj}"'), 0)
+    expect("kit.py checks --run --handoff H 擋（會蓋掉開發端的檢查紀錄）", g_bash(f'py -3 "{p26kit_s}" checks --run --handoff {H30}'), 2)
+    expect("kit.py checks（沒 --run）擋", g_bash(f'py -3 "{p26kit_s}" checks'), 2)
+    expect("kit.py install 擋", g_bash(f'py -3 "{p26kit_s}" install'), 2)
+    expect("kit.py claude-review 擋", g_bash(f'py -3 "{p26kit_s}" claude-review --end {H30} --model x'), 2)
+    expect("kit.py verify 多一個不認得的參數擋", g_bash(f'py -3 "{p26kit_s}" verify --json'), 2)
+    expect("kit.py verify --handoff ../../x 擋", g_bash(f'py -3 "{p26kit_s}" verify --handoff ../../x'), 2)
+    expect("kit.py verify --target 別專案擋", g_bash(f'py -3 "{p26kit_s}" verify --target "{p10.resolve()}"'), 2)
+    expect("python3 本專案 kit.py verify 放行（小隊長 11-01：macOS／Linux 用）", g_bash(f'python3 "{p26kit_s}" verify'), 0)
+    expect("python 本專案 kit.py verify 放行", g_bash(f'python "{p26kit_s}" verify'), 0)
+    expect("python3 別專案 kit.py 擋", g_bash(f'python3 "{p10kit_s}" verify'), 2)
+    expect("py（沒有 -3）擋", g_bash(f'py "{p26kit_s}" verify'), 2)
+    expect("py -3 別專案 kit.py 擋", g_bash(f'py -3 "{p10kit_s}" verify'), 2)
+    expect("py -3 -c 任意程式擋", g_bash('py -3 -c "print(1)"'), 2)
+    expect("py -3 相對路徑（hook cwd＝專案）放行", g_bash("py -3 .ai-review/kit/kit.py verify", hcwd=pj), 0)
+    expect("py -3 路徑含 ..、解析後仍是本專案 kit.py 放行", g_bash(f'py -3 "{pj}/.ai-review/kit/../kit/kit.py" verify'), 0)
+    if os.name == "nt":
+        expect("Windows 不分大小寫：大寫 kit.py 路徑放行", g_bash(f'py -3 "{p26kit_s.upper()}" verify'), 0)
+        expect("正斜線 kit.py 路徑放行", g_bash(f'py -3 "{p26kit_s.replace(chr(92), "/")}" verify'), 0)
+        expect("沒加引號的反斜線路徑（bash 會吃掉反斜線）擋", g_bash(f"py -3 {p26kit_s} verify"), 2)
+    # Bash：config 第 4 節原文
+    expect("config 第 4 節命令原文（echo ok）放行", g_bash("echo ok"), 0)
+    expect("config 第 4 節命令多一個參數擋", g_bash("echo ok extra"), 2)
+    expect("config 第 4 節命令多空白擋", g_bash("echo  ok"), 2)
+    expect("config 第 4 節登記但含 && 的命令仍擋（改用 kit.py checks --run）", g_bash("echo a && echo b"), 2)
+    expect("白名單外命令（cat app.py）擋", g_bash("cat app.py"), 2)
+    # 其他
+    expect("未知工具（WebFetch）擋", guard({"tool_name": "WebFetch", "tool_input": {"url": "http://x"}, "cwd": str(root)}), 2)
+    expect("沒有 tool_name 擋", guard({"tool_input": {"command": "git diff"}, "cwd": str(root)}), 2)
+    expect("壞 JSON 擋（fail-closed）", guard(raw=b"not json"), 2)
+    expect("空的 stdin 擋（fail-closed）", guard(raw=b""), 2)
+    expect("JSON 不是物件擋（fail-closed）", guard(raw=b"[1, 2]"), 2)
+    expect("找不到專案（套件來源的 kit.py、cwd 不在專案裡）擋（fail-closed）",
+           guard({"tool_name": "Bash", "tool_input": {"command": "git diff"}, "cwd": str(root)}, script=KIT_PY), 2)
+    rc, out, err = g_bash("git diff --output=x.txt")
+    check("T31 擋下時 stderr 給白話原因與白名單", rc == 2 and "擋下" in err and "只能寫" in err and "R-*.md" in err and "checks --run" in err,
+          err[-500:])
+    check("T31 放行時不輸出任何東西", g_bash("git diff")[1:] == ("", ""), str(g_bash("git diff")))
+    check("T31 守門沒有在專案留下 x.txt 之類的檔", not (p26 / "x.txt").exists() and not (root / "x.txt").exists())
+    # T-0199 W4：V2-B SubagentHandback、RV-9 --show-signature、RV-2 寫入規則、RV-1 心跳、RV-10 說明文字
+    expect("SubagentHandback（子代理交最後回報，不碰檔案）放行（V2-B）",
+           guard({"tool_name": "SubagentHandback", "tool_input": {"message": "R-x needs-fix"}, "cwd": str(root)}), 0)
+    expect("其他未知工具（TodoWrite）仍擋", guard({"tool_name": "TodoWrite", "tool_input": {"todos": []}, "cwd": str(root)}), 2)
+    expect("git log --show-signature 擋（會執行 gpg.program，RV-9）", g_bash("git log --show-signature"), 2)
+    expect("git log --show-notes 放行（不是 show-signature 的縮寫）", g_bash("git log --show-notes"), 0)
+    expect("Write 到審查開始前就有的 R（R-20990102-0002）擋（RV-2）", g_edit(rv / "R-20990102-0002.md", "Write"), 2)
+    expect("Edit 審查開始前就有的 R（例如 Codex 的報告）擋（RV-2）", g_edit(rv / "R-20990102-0003.md"), 2)
+    expect("MultiEdit 審查開始前就有的 R 擋", g_edit(rv / "R-20990102-0003.md", "MultiEdit"), 2)
+    if os.name == "nt":
+        expect("Edit 審查開始前就有的 R（檔名大小寫不同）仍擋", g_edit(str(rv) + "\\r-20990102-0003.MD"), 2)
+    write(rv / "R-20990103-0002.md", front("R-20990103-0002", "review", handoff=H31, target=sn31["target"], reviewer="claude-isolated",
+                                           verdict="needs-fix", blocking=1))
+    expect("Edit 這次新寫的 R 放行", g_edit(rv / "R-20990103-0002.md"), 0)
+    expect("Write 覆寫這次新寫、已存在的 R 擋（改用 Edit）", g_edit(rv / "R-20990103-0002.md", "Write"), 2)
+    rc, out, err = g_edit(rv / "R-20990103-0002.md", "Write")
+    check("T31 Write 已存在的 R → 原因寫「Write 只能建新的…用 Edit」", "Write 只能建新的審查報告" in err and "Edit" in err, err[-300:])
+    gl31 = [json.loads(x) for x in read(glog31).splitlines() if x.strip()] if glog31.exists() else []
+    edit_tools = {"Write", "Edit", "MultiEdit"}
+    check("T31 守門心跳：每次呼叫都記一行（有放行也有擋下），時間、工具名、決定三欄；放行的寫檔多記 R 檔名（RV-1）",
+          len(gl31) > 50 and {g.get("decision") for g in gl31} == {"allow", "block"}
+          and all(set(g) == ({"time", "tool", "decision", "file"} if (g["tool"] in edit_tools and g["decision"] == "allow")
+                             else {"time", "tool", "decision"}) for g in gl31)
+          and "SubagentHandback" in {g.get("tool") for g in gl31}, f"{len(gl31)} 筆 " + json.dumps(gl31[:3], ensure_ascii=False))
+    gfiles = {g.get("file") for g in gl31 if "file" in g}
+    check("T31 心跳的寫檔紀錄只有 R 檔名（不含路徑），擋下的寫檔不記檔名",
+          "R-20990103-0002.md" in gfiles and all(f and "/" not in f and "\\" not in f and f.upper().startswith("R-") for f in gfiles)
+          and "R-20990102-0003.md" not in gfiles and "notes.md" not in gfiles, json.dumps(sorted(gfiles), ensure_ascii=False))
+    check("T31 守門心跳不記指令與路徑內容", "git diff" not in read(glog31) and pj not in read(glog31) and "p26-claude-review" not in read(glog31),
+          read(glog31)[:300])
+    rc, out, err = g_bash("git diff --output=x.txt")
+    check("T31 擋下說明：new-id 只准 R、只有 state 能帶 --json、路徑用雙引號或正斜線（RV-10／RV-7）",
+          "new-id R" in err and "只有 state 可帶 --json" in err and "雙引號或正斜線" in err, err[-600:])
+    # 沒有任何開審紀錄 → 所有寫入都擋（強制先 --begin）；指令照白名單
+    p10rv = p10.resolve() / ".ai-review" / "reviews"
+    p10_guard = lambda pl: guard(pl, script=p10kit)
+    expect("沒有開審紀錄（.running）時 Write 到 reviews/R-*.md 也擋（RV-2）",
+           p10_guard({"tool_name": "Write", "tool_input": {"file_path": str(p10rv / "R-20990103-0001.md"), "content": "x"},
+                      "cwd": str(root)}), 2)
+    rc, out, err = p10_guard({"tool_name": "Write", "tool_input": {"file_path": str(p10rv / "R-20990103-0001.md"), "content": "x"},
+                              "cwd": str(root)})
+    check("T31 沒有開審紀錄 → 原因寫要先 claude-review --begin", "claude-review --begin" in err, err[-300:])
+    expect("沒有開審紀錄時唯讀指令照放（git diff）", p10_guard({"tool_name": "Bash", "tool_input": {"command": "git diff"}, "cwd": str(p10)}), 0)
+    write(p10 / ".ai-review/.cache/claude-H-20990101-0000.running", "{}\n")
+    expect("開審紀錄是舊版格式（沒有審前報告清單）→ 寫入擋",
+           p10_guard({"tool_name": "Write", "tool_input": {"file_path": str(p10rv / "R-20990103-0001.md"), "content": "x"},
+                      "cwd": str(root)}), 2)
+    check("T31 開審紀錄讀不懂時心跳照記（寫到該交接的心跳檔）",
+          (p10 / ".ai-review/.cache/claude-H-20990101-0000.guard.jsonl").is_file())
+
+    # ---------------- T32 reviewer-agent：巢狀專案用的子代理定義（0.5.0）
+    sess = root / "t32-session"
+    nested = new_git_project(sess / "sub", "proj")
+    kit("install", "--target", str(nested))
+    nk = nested / ".ai-review/kit/kit.py"
+    agent_installed = read(nested / ".claude/agents/independent-reviewer.md")
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess), cwd=root, script=nk)
+    outn = out.replace("\r\n", "\n")
+    check("T32 巢狀：hook 路徑換成 ${CLAUDE_PROJECT_DIR}/sub/proj/.ai-review/kit/kit.py",
+          rc == 0 and "${CLAUDE_PROJECT_DIR}/sub/proj/.ai-review/kit/kit.py" in outn
+          and "${CLAUDE_PROJECT_DIR}/.ai-review/kit/kit.py" not in outn, out[-400:] + err[-300:])
+    check("T32 只換 hook 路徑、其他內容原樣", outn.replace("${CLAUDE_PROJECT_DIR}/sub/proj/", "${CLAUDE_PROJECT_DIR}/")
+          == agent_installed.replace("\r\n", "\n"), outn[:300])
+    check("T32 輸出不含絕對路徑", str(sess) not in out and str(sess.resolve()) not in out and str(root) not in out, out[:300])
+    rc, out, err = kit("reviewer-agent", "--session-root", str(nested), cwd=root, script=nk)
+    check("T32 對話根就是專案 → hook 路徑不變", rc == 0 and "${CLAUDE_PROJECT_DIR}/.ai-review/kit/kit.py" in out, out[-300:] + err[-300:])
+    if os.name == "nt":
+        rc, out, err = kit("reviewer-agent", "--session-root", str(sess).upper(), cwd=root, script=nk)
+        check("T32 Windows 不分大小寫：大寫的對話根也認得、相對路徑照專案原本大小寫",
+              rc == 0 and "${CLAUDE_PROJECT_DIR}/sub/proj/.ai-review/kit/kit.py" in out, out[-300:] + err[-300:])
+    (root / "t32-elsewhere").mkdir(exist_ok=True)
+    rc, out, err = kit("reviewer-agent", "--session-root", str(root / "t32-elsewhere"), cwd=root, script=nk)
+    check("T32 專案不在對話根底下 → 拒絕（exit 2）", rc == 2 and "不在" in err and out.strip() == "", out[-300:] + err[-300:])
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess / "su"), cwd=root, script=nk)
+    check("T32 名稱前綴相同但不是上層（sess/su vs sess/sub）→ 拒絕", rc == 2, out[-300:] + err[-300:])
+    outf = root / "t32-out" / "independent-reviewer.md"
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess), "--out", str(outf), cwd=root, script=nk)
+    check("T32 --out 寫檔、內容是改好的定義", rc == 0 and outf.is_file()
+          and "${CLAUDE_PROJECT_DIR}/sub/proj/.ai-review/kit/kit.py" in read(outf) and "重開 Claude Code" in out, out[-300:] + err[-300:])
+    write(outf, "MARK\n")
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess), "--out", str(outf), cwd=root, script=nk)
+    check("T32 --out 已存在、沒帶 --force → 不覆寫（exit 1）", rc == 1 and read(outf) == "MARK\n" and "--force" in err, out[-300:] + err[-300:])
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess), "--out", str(outf), "--force", cwd=root, script=nk)
+    check("T32 --force 才覆寫", rc == 0 and "sub/proj/.ai-review/kit/kit.py" in read(outf), out[-300:] + err[-300:])
+    # 專案沒裝 agent 檔 → 讀套件來源的 claude/agents/independent-reviewer.md
+    src32 = root / "kit-src-t32"
+    shutil.copytree(KIT_ROOT, src32, ignore=shutil.ignore_patterns(".git", "__pycache__", "dist", "tests"))
+    nested2 = sess / "other" / "proj2"
+    (nested2 / ".ai-review").mkdir(parents=True)
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess), "--target", str(nested2), cwd=root, script=src32 / "tools/kit.py")
+    check("T32 專案沒有 agent 檔 → 改讀套件來源的定義", rc == 0 and "${CLAUDE_PROJECT_DIR}/other/proj2/.ai-review/kit/kit.py" in out,
+          out[-300:] + err[-300:])
+    # 定義被改壞：沒有 hook 路徑 → reviewer-agent 拒絕；沒有 omitClaudeMd → doctor 列 ✗
+    agent_p = nested / ".claude/agents/independent-reviewer.md"
+    write(agent_p, agent_installed.replace("omitClaudeMd: true", "omitClaudeMd: false"))
+    rc, out, err = kit("doctor", "--json", "--codex", str(root / "no-such-codex.exe"), cwd=nested, script=nk)
+    ca = next((i for i in (json.loads(out) if rc == 0 else {}).get("items", []) if i["key"] == "claude_agent"), {})
+    check("T32 doctor：agent 檔缺 omitClaudeMd: true → claude_agent ✗ 並說怎麼補", ca.get("ok") is False
+          and "omitClaudeMd" in ca.get("detail", "") and "take-source" in ca.get("detail", ""), json.dumps(ca, ensure_ascii=False))
+    write(agent_p, "---\nname: independent-reviewer\n---\nno hook here\n")
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess), cwd=root, script=nk)
+    check("T32 agent 檔裡沒有 hook 路徑 → 拒絕（exit 1）", rc == 1 and "找不到 hook 路徑" in err, out[-300:] + err[-300:])
+    rc, out, err = kit("doctor", "--json", "--codex", str(root / "no-such-codex.exe"), cwd=nested, script=nk)
+    ca = next((i for i in (json.loads(out) if rc == 0 else {}).get("items", []) if i["key"] == "claude_agent"), {})
+    check("T32 doctor：agent 檔缺 review-guard → ✗", ca.get("ok") is False and "review-guard" in ca.get("detail", ""),
+          json.dumps(ca, ensure_ascii=False))
+
+    # ---------------- T33 修正輪（T-0199 W4）：RV-1～RV-11、V2-A～C 的重現改寫成測試
+    # 子代理定義：守門自檢、onFailure、路徑寫法、Write 只建新檔（RV-1 c／d、RV-7、V2-C、RV-10）
+    agent_src = read(KIT_ROOT / "claude/agents/independent-reviewer.md")
+    check("T33 agent 檔：守門 hook 加 onFailure: block（RV-1 d）", re.search(r"^\s+onFailure: block\s*$", agent_src, re.M) is not None,
+          agent_src[:600])
+    check("T33 agent 檔：第 0 步守門自檢 echo guard-canary，沒被擋就回報「守門未生效，停止審查」、不寫 R（RV-1 c）",
+          "echo guard-canary" in agent_src and "守門未生效，停止審查" in agent_src and "不寫 R" in agent_src, "")
+    check("T33 agent 檔：路徑一律用雙引號或正斜線、Write 只建新檔（RV-7／V2-C／RV-2）",
+          "路徑一律用雙引號或正斜線" in agent_src and "Write 只能建新檔" in agent_src, "")
+    check("T33 review-ready skill：路徑一律用雙引號或正斜線（V2-C）", "路徑一律用雙引號或正斜線" in skill_rr, "")
+    # reviewer-agent --python：沒有 py 的電腦（RV-1／RV-8）
+    rc, out, err = kit("reviewer-agent", "--session-root", str(p26), "--python", "python3", cwd=root, script=p26kit)
+    outp = out.replace("\r\n", "\n")
+    check("T33 reviewer-agent --python python3：command 換成 python3、args 拿掉 -3、其他不變",
+          rc == 0 and re.search(r"^\s+command: python3$", outp, re.M) is not None and '"-3"' not in outp
+          and 'args: ["${CLAUDE_PROJECT_DIR}/.ai-review/kit/kit.py", "hook", "review-guard"]' in outp
+          and outp.replace("command: python3", "command: py").replace('args: ["${', 'args: ["-3", "${')
+          == read(p26 / ".claude/agents/independent-reviewer.md").replace("\r\n", "\n"), out[:400] + err[-300:])
+    rc, out, err = kit("reviewer-agent", "--session-root", str(p26), "--python", "a b", cwd=root, script=p26kit)
+    check("T33 reviewer-agent --python 含空白 → 拒絕（exit 2）", rc == 2 and out.strip() == "", err[-300:])
+
+    p27 = new_git_project(root, "p27-fix-round")
+    kit("install", "--target", str(p27))
+    p27kit = p27 / ".ai-review/kit/kit.py"
+    write(p27 / ".ai-review/config.md", read(p26 / ".ai-review/config.md"))
+    cache27 = p27 / ".ai-review/.cache"
+
+    def st27():
+        rc, out, err = kit("state", "--json", "--no-write", cwd=p27, script=p27kit)
+        return json.loads(out) if rc == 0 else {}
+
+    # RV-6：state.json 原本不存在時，--end 不把自己寫的 state.json 報成「審查期間多了 1 項」
+    os.replace(p27 / ".ai-review/state.json", p27 / ".ai-review/state.json.t33-moved")
+    HA, snA = new_handoff(p27, p27kit, "t33a")
+    rc, out, err = kit("claude-review", "--begin", HA, cwd=p27, script=p27kit)
+    check("T33 前置：--begin exit 0", rc == 0, out[-300:])
+    review_file(p27, "R-20990104-0001", HA, snA["target"])
+    # RV-1／V2-A：守門心跳 0 筆（守門沒執行）→ 顯眼警告、照收、.done 記 guard_calls 0、isolation 標 guard-not-observed、exit 0
+    rc, out, err = kit("claude-review", "--end", HA, "--model", "fable", cwd=p27, script=p27kit)
+    djA = json.loads(read(cache27 / f"claude-{HA}.done")) if (cache27 / f"claude-{HA}.done").exists() else {}
+    check("T33 RV-6 前：state.json 原本不存在，--end 不再警告「多了 .ai-review/state.json」",
+          rc == 0 and "state.json" not in out and "new_ignored_entries" not in djA, out[-600:] + json.dumps(djA, ensure_ascii=False)[:300])
+    check("T33 RV-1：守門心跳 0 筆 → 顯眼警告（未信任資料夾、找不到 py、沒有守門保護）、exit 仍 0",
+          rc == 0 and "守門 hook 沒有執行紀錄" in out and "信任" in out and "py" in out and "沒有守門保護" in out
+          and "doctor" in out, out[-900:])
+    check("T33 RV-1：.done 記 guard_calls 0、isolation＝subagent;omitClaudeMd;no-memory;guard-not-observed",
+          djA.get("guard_calls") == 0 and djA.get("isolation") == "subagent;omitClaudeMd;no-memory;guard-not-observed",
+          json.dumps(djA, ensure_ascii=False)[:400])
+    check("T33 RV-1：--end 與 state 的結論標「（非 Codex 審查；守門未生效）」",
+          "no-blocking-found（非 Codex 審查；守門未生效）" in out, out[-500:])
+    rc, out, err = kit("status", cwd=p27, script=p27kit)
+    check("T33 RV-1：status 也標「守門未生效」", rc == 0 and "（非 Codex 審查；守門未生效）" in out, out[-400:])
+    rc, out, err = kit("hook", "session-start", cwd=p27, script=p27kit, input_text=b"{}")
+    check("T33 RV-1：SessionStart 也標「守門未生效」", rc == 0 and "（非 Codex 審查；守門未生效）" in out, out[-400:])
+    check("T33 RV-1：state.json 的 review.guard_observed＝false", (st27().get("review") or {}).get("guard_observed") is False,
+          json.dumps(st27().get("review"), ensure_ascii=False))
+    # RV-3：--begin --again 後審查員沒寫新報告 → --end exit 1「這次沒有新的審查報告」，不把舊 R 當這次的結果
+    rc, out, err = kit("claude-review", "--begin", HA, "--again", cwd=p27, script=p27kit)
+    rc, out, err = kit("claude-review", "--end", HA, "--model", "fable", cwd=p27, script=p27kit)
+    check("T33 RV-3：沒有新 R → exit 1「這次沒有新的審查報告」、不寫 .done、開始紀錄留著",
+          rc == 1 and "這次沒有新的審查報告" in out and "隔離 Claude 審查結束" not in out
+          and not (cache27 / f"claude-{HA}.done").exists() and (cache27 / f"claude-{HA}.running").exists(), out[-600:])
+    # RV-2：審查期間舊 R 被改 → --end 警告並 exit 1；.done 記 review_integrity
+    write(p27 / ".ai-review/reviews/R-20990104-0001.md",
+          read(p27 / ".ai-review/reviews/R-20990104-0001.md").replace("no-blocking-found", "needs-fix"))
+    review_file(p27, "R-20990104-0002", HA, snA["target"])
+    rc, out, err = kit("claude-review", "--end", HA, "--model", "fable", cwd=p27, script=p27kit)
+    djA2 = json.loads(read(cache27 / f"claude-{HA}.done")) if (cache27 / f"claude-{HA}.done").exists() else {}
+    check("T33 RV-2：審查開始前就有的 R 被改 → 警告「被改或被刪」並 exit 1，.done 記 review_integrity",
+          rc == 1 and "被改或被刪" in out and "改：R-20990104-0001.md" in out
+          and (djA2.get("review_integrity") or {}).get("modified") == ["R-20990104-0001.md"], out[-700:] + json.dumps(djA2)[:300])
+    # RV-2：審查期間新寫的 R 自稱 codex → exit 1；gate --require-reviewer codex 也不放行（沒有 codex-review 紀錄）
+    HB, snB = new_handoff(p27, p27kit, "t33b")
+    kit("claude-review", "--begin", HB, cwd=p27, script=p27kit)
+    rc, out, err = guard_call(p27kit, {"tool_name": "Write", "tool_input": {
+        "file_path": str(p27.resolve() / ".ai-review/reviews/R-20990104-0003.md"), "content": "x"}, "cwd": str(p27)})
+    check("T33 前置：隔離 Claude 審查員 Write 新的 R-0003 → 守門放行並在心跳記檔名",
+          rc == 0 and '"file": "R-20990104-0003.md"' in read(cache27 / f"claude-{HB}.guard.jsonl"), err[-300:])
+    review_file(p27, "R-20990104-0003", HB, snB["target"], reviewer="codex", model=None)
+    review_file(p27, "R-20990104-0004", HB, snB["target"])
+    rc, out, err = kit("claude-review", "--end", HB, "--model", "fable", cwd=p27, script=p27kit)
+    check("T33 RV-2：審查期間新寫的 R 自稱 reviewer codex → 點名並 exit 1",
+          rc == 1 and "R-20990104-0003.md（reviewer codex）" in out, out[-600:])
+    os.replace(p27 / ".ai-review/reviews/R-20990104-0004.md", p27 / ".ai-review/R-20990104-0004.md.t33-moved")
+    rc, out, err = kit("gate", "--require-reviewer", "codex", cwd=p27, script=p27kit)
+    check("T33 RV-2：隔離 Claude 審查員寫的 reviewer: codex 報告（在守門寫檔紀錄裡）過不了 gate --require-reviewer codex",
+          rc == 1 and "冒充 Codex" in out and "guard.jsonl" in out, out[-500:])
+    # RV-4：Codex 失敗（沒寫報告），最新的 R 是隔離 Claude 的 → codex-review 不把它報成 Codex 的結果
+    HC, snC = new_handoff(p27, p27kit, "t33c")
+    kit("claude-review", "--begin", HC, cwd=p27, script=p27kit)
+    guard_call(p27kit, {"tool_name": "Bash", "tool_input": {"command": "echo guard-canary"}, "cwd": str(p27)})
+    review_file(p27, "R-20990104-0005", HC, snC["target"])
+    rc, out, err = kit("claude-review", "--end", HC, "--model", "fable", cwd=p27, script=p27kit)
+    check("T33 前置：隔離 Claude 審查 R-0005 收尾 exit 0（有心跳，不標守門未生效）",
+          rc == 0 and "no-blocking-found（非 Codex 審查）" in out and "守門未生效" not in out, out[-500:])
+    rc, out, err = sh([PY, str(p27kit), "codex-review", "--again", "--codex", str(fake)], cwd=p27,
+                      env=dict(ENV, FAKE_CODEX_MODE="noreport"))
+    dC = json.loads(read(cache27 / f"codex-{HC}.done")) if (cache27 / f"codex-{HC}.done").exists() else {}
+    check("T33 RV-4：Codex 沒寫報告 → 不收隔離 Claude 的 R、走「沒有找到對應交接的審查報告」exit 1、.done review 空",
+          rc == 1 and "沒有找到對應交接" in out and "審查報告：R-20990104-0005" not in out and dC.get("review") is None,
+          out[-600:] + json.dumps(dC)[:300])
+    # RV-5：Codex 判 needs-fix 後，較弱的隔離 Claude 判 no-blocking-found 不能推翻
+    # 報告編號照時間排序：Claude R-0005（0104）→ Codex（0105）→ Claude（0106）→ Codex（0107）
+    rc, out, err = sh([PY, str(p27kit), "codex-review", "--again", "--codex", str(fake)], cwd=p27,
+                      env=dict(ENV, FAKE_CODEX_MODE="needsfix", FAKE_CODEX_RID="R-20990105-0001"))
+    dC = json.loads(read(cache27 / f"codex-{HC}.done")) if (cache27 / f"codex-{HC}.done").exists() else {}
+    rid_codex = dC.get("review") or "R-missing"
+    check("T33 RV-4／5 前置：Codex 寫新報告 needs-fix → codex-review 收這份（reviewer codex）",
+          rc == 0 and dC.get("verdict") == "needs-fix" and rid_codex == "R-20990105-0001", out[-500:] + json.dumps(dC)[:300])
+    kit("claude-review", "--begin", HC, "--again", cwd=p27, script=p27kit)
+    guard_call(p27kit, {"tool_name": "Bash", "tool_input": {"command": "echo guard-canary"}, "cwd": str(p27)})
+    review_file(p27, "R-20990106-0001", HC, snC["target"])
+    rc, out, err = kit("claude-review", "--end", HC, "--model", "fable", cwd=p27, script=p27kit)
+    s = st27()
+    check("T33 RV-5：Codex needs-fix 之後的隔離 Claude no-blocking-found 不取代 → 狀態維持 needs-fix、註明理由",
+          s.get("status") == "needs-fix" and (s.get("review") or {}).get("id") == rid_codex
+          and any(f"此交接曾被 {rid_codex}" in n and "較弱的審查員不能推翻" in n and "重審請用 Codex 或修正後重新交接" in n
+                  for n in s.get("notes", [])), json.dumps(s, ensure_ascii=False)[:700])
+    check("T33 RV-5：--end 提醒狀態採用的不是這份報告", f"狀態採用的是 {rid_codex}" in out, out[-500:])
+    rc, out, err = kit("gate", cwd=p27, script=p27kit)
+    check("T33 RV-5：gate exit 1，並印審查歷程（Claude 的那份標未採用）",
+          rc == 1 and f"審查歷程（交接 {HC}）" in out and "R-20990106-0001 claude-isolated no-blocking-found（未採用" in out
+          and f"{rid_codex} codex needs-fix（採用）" in out, out[-700:])
+    # 同種審查員重審：Codex → Codex 後者為準；Codex 可以取代 Claude
+    rc, out, err = sh([PY, str(p27kit), "codex-review", "--again", "--codex", str(fake)], cwd=p27,
+                      env=dict(ENV, FAKE_CODEX_RID="R-20990107-0001"))
+    s = st27()
+    check("T33 RV-5：Codex 重審（Codex → Codex）後者為準 → no-blocking-found",
+          rc == 0 and s.get("status") == "no-blocking-found" and (s.get("review") or {}).get("reviewer") == "codex",
+          out[-400:] + json.dumps(s, ensure_ascii=False)[:400])
+    HD, snD = new_handoff(p27, p27kit, "t33d")
+    review_file(p27, "R-20990104-0007", HD, snD["target"], verdict="needs-fix")
+    review_file(p27, "R-20990104-0008", HD, snD["target"])
+    check("T33 RV-5：Claude → Claude 照舊後者為準（no-blocking-found）", st27().get("status") == "no-blocking-found",
+          json.dumps(st27(), ensure_ascii=False)[:400])
+    review_file(p27, "R-20990104-0009", HD, snD["target"], verdict="needs-fix")
+    review_file(p27, "R-20990104-0010", HD, snD["target"], reviewer="codex", model=None)
+    check("T33 RV-5：Claude needs-fix 之後的 Codex no-blocking-found 可以取代", st27().get("status") == "no-blocking-found"
+          and (st27().get("review") or {}).get("id") == "R-20990104-0010", json.dumps(st27(), ensure_ascii=False)[:400])
+    check("T33 所有情境都沒刪任何報告",
+          all((p27 / ".ai-review/reviews" / f"R-20990104-{n:04d}.md").is_file() for n in (1, 2, 3, 5, 7, 8, 9, 10))
+          and all((p27 / ".ai-review/reviews" / f"{r}.md").is_file() for r in ("R-20990105-0001", "R-20990106-0001", "R-20990107-0001")))
 
     # ---------------- 總結
     fails = [r for r in RESULTS if not r[1]]

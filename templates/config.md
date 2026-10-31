@@ -63,6 +63,8 @@ name | command | required
 
 - 阻擋等級：critical、high 一律阻擋；medium（是/否）阻擋：
 - 合併／部署前條件：狀態必須是「本次範圍內未發現阻擋問題」且指紋相符（`kit.py gate` exit 0）。
+- big_change_files: 10　（大件門檻：一次交接改動的檔數超過這個數，`/review-ready` 改送 Codex 審查；沒填當 10）
+- 發版前 gate 需 Codex 審查：（是/否）　（是＝發版前跑 `kit.py gate --require-reviewer codex`，最新有效審查不是 Codex、或本機紀錄顯示那份「Codex」報告不是 Codex 寫的就不放行；本機關卡，CI 不帶）
 - 本地關卡可以被略過（沒有遠端保護規則）。目前遠端保護：（無／GitHub branch protection 已設／CI 必須通過）
 
 ## 6. 未驗證事項（誠實清單）

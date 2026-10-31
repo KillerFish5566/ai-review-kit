@@ -5,7 +5,8 @@ ai-review-kit 工具（純 Python 標準函式庫，Python 3.9+）
 
 兩種身分、同一支檔案：
   A. 放在套件來源 `ai-review-kit/tools/kit.py`  → 管理指令：install / update / restore / status / pack / check-update
-  B. 被安裝到專案 `<專案>/.ai-review/kit/kit.py` → 專案指令：status / snapshot / checks / state / verify / gate / new-id / codex-review / ignore-check / doctor / hook / relink
+  B. 被安裝到專案 `<專案>/.ai-review/kit/kit.py` → 專案指令：status / snapshot / checks / state / verify / gate / new-id / codex-review /
+     claude-review / reviewer-agent / ignore-check / doctor / hook / relink
      （B 也能跑 update，來源用 --source 指定，或用安裝紀錄裡記住的來源路徑）
 
 設計要點
@@ -60,6 +61,15 @@ STATUS_LABELS = {
     "no-blocking-found": "本次範圍內未發現阻擋問題",
 }
 SELF_REVIEWERS = {"", "self", "claude", "claude-code", "developer", "developer-ai", "dev", "author"}
+# 隔離的 Claude 子代理審查員（0.5.0）：另開、不帶開發脈絡、不讀 CLAUDE.md 與記憶、不同模型、受 review-guard 守門。
+# 算獨立審查（不在 SELF_REVIEWERS），但狀態輸出一律標「非 Codex 審查」。
+CLAUDE_REVIEWER = "claude-isolated"
+NON_CODEX_MARK = "（非 Codex 審查）"
+GUARD_OFF_MARK = "（非 Codex 審查；守門未生效）"            # --end 時守門心跳 0 筆（T-0199 W4）
+ISOLATION_NO_GUARD = "subagent;omitClaudeMd;no-memory;guard-not-observed"
+CLAUDE_MIN_VERSION = (2, 1, 271)                            # 子代理定義的 omitClaudeMd 要這版以上（舊版默默忽略）
+AGENT_SRC_REL = "claude/agents/independent-reviewer.md"
+AGENT_DST_REL = ".claude/agents/independent-reviewer.md"
 DEFAULT_TIMEOUT = 600
 
 
@@ -238,6 +248,8 @@ def file_map(src_root):
     for d in sorted((src_root / "claude" / "skills").iterdir()):
         if (d / "SKILL.md").exists():
             m.append((f"claude/skills/{d.name}/SKILL.md", f".claude/skills/{d.name}/SKILL.md"))
+    if (src_root / AGENT_SRC_REL).exists():          # 審查員子代理定義（0.5.0；舊版來源沒有就不列）
+        m.append((AGENT_SRC_REL, AGENT_DST_REL))
     for d in sorted((src_root / "codex" / "skills").iterdir()):
         if (d / "SKILL.md").exists():
             m.append((f"codex/skills/{d.name}/SKILL.md", f".agents/skills/{d.name}/SKILL.md"))
@@ -541,6 +553,11 @@ def print_plan(actions, target, show_diff=False, config=None):
     print("|---|---|")
     for a in actions:
         print(f"| {a['rel']} | {a['action']} |")
+    agent = next((a for a in actions if a["rel"] == AGENT_DST_REL), None)
+    if agent and agent["action"] != "unchanged":
+        print(f"\n註：{AGENT_DST_REL} 是審查員子代理定義，子代理定義含守門 hook"
+              "（審查員每次用工具前會執行 kit.py hook review-guard，只准寫審查報告、只准白名單命令），請確認後再安裝。"
+              "第一次裝 agent 檔要重開 Claude Code 才會被發現。")
     if config:
         print("\n設定與紀錄檔（hook 會讓 Claude Code／Codex 開工時自動執行 kit.py，請確認後再安裝）：")
         print("| 項目 | 動作 |")
@@ -696,6 +713,8 @@ def do_install_or_update(args, mode):
         print("有衝突項目未處理，見上方清單。")
     print(f"下一步：先跑 `py -3 \"{target / '.ai-review' / 'kit' / 'kit.py'}\" doctor` 看還缺什麼（Codex、登入、gitleaks…），"
           "再在專案根目錄開 Claude Code 跑 /safety-setup（每個專案一次）。hooks 要重開 Claude Code 才載入。")
+    if any(a["rel"] == AGENT_DST_REL and a["action"] in ("add", "update", "update(forced)") for a in actions):
+        print(f"審查員子代理定義（{AGENT_DST_REL}）已寫入：第一次裝 agent 檔要重開 Claude Code（新的 agents 資料夾要重開才會被發現）。")
     src.cleanup()
     return 0
 
@@ -891,7 +910,7 @@ def literal_env_dirs(target):
 def shallow_listing(target):
     """專案根目錄與第一層資料夾的項目清單，**包括 .gitignore 排除的**（G5，未發版）。
     指紋與 workspace_listing 照 .gitignore 收檔，看不到審查寫進被排除位置（例如 data/）的東西；這份清單補這個盲點。
-    不含 .git/ 內部；.ai-review/.cache/ 底下是審查預期會寫的，不列。資料夾以 / 結尾。"""
+    不含 .git/ 內部；.ai-review/.cache/ 底下是審查預期會寫的、.ai-review/state.json 是 kit 自己寫的，不列。資料夾以 / 結尾。"""
     target = Path(target)
     out = set()
     try:
@@ -908,7 +927,8 @@ def shallow_listing(target):
         try:
             for c in p.iterdir():
                 r = f"{p.name}/{c.name}"
-                if r == ".ai-review/.cache":
+                # .cache 是審查預期會寫的；state.json 是 kit 收尾時自己推導寫出的（RV-6：不算審查期間多出來的）
+                if r in (".ai-review/.cache", ".ai-review/state.json"):
                     continue
                 out.add(r + ("/" if c.is_dir() else ""))
         except OSError:
@@ -1159,6 +1179,72 @@ def latest_report(target, kind_dir):
     return rs[-1] if rs else None
 
 
+def reviews_listing(target):
+    """.ai-review/reviews/ 底下每個檔的 {檔名: sha256}（審前清單；RV-2／RV-3／RV-4）。"""
+    d = Path(target) / ".ai-review" / "reviews"
+    out = {}
+    try:
+        for p in sorted(d.iterdir()):
+            if p.is_file():
+                out[p.name] = sha256_file(p)
+    except OSError:
+        pass
+    return out
+
+
+def _name_key(n):
+    return os.path.normcase(n)
+
+
+def reviews_changed(target, before):
+    """跟審前清單比：(新增的檔名, 內容被改的舊檔, 被刪的舊檔)。Windows 檔名不分大小寫。"""
+    now = reviews_listing(target)
+    bk = {_name_key(k): v for k, v in (before or {}).items()}
+    nk = {_name_key(k): (k, v) for k, v in now.items()}
+    added = sorted(k for key, (k, v) in nk.items() if key not in bk)
+    modified = sorted(k for key, (k, v) in nk.items() if key in bk and bk[key] != v)
+    removed = sorted(k for k in (before or {}) if _name_key(k) not in nk)
+    return added, modified, removed
+
+
+def new_reports_of(target, names):
+    """新增檔名 → [(檔名, 檔頭 dict 或 None)]，照檔名排序。"""
+    d = Path(target) / ".ai-review" / "reviews"
+    return [(n, parse_front(d / n)) for n in sorted(names)]
+
+
+def reviewer_rank(r):
+    """審查員強弱：隔離 Claude＝1，其他獨立審查員（codex 等）＝2（RV-5）。"""
+    return 1 if is_claude_reviewer(r) else 2
+
+
+def pick_review(valid_reviews):
+    """同一份交接的有效審查照編號順序，後者為準；例外：較弱的審查員不能推翻較強審查員的 needs-fix（RV-5，小隊長裁決保守側）。
+    回傳 (採用的審查, 未採用的較弱審查清單, 被維持的 needs-fix 審查或 None)。"""
+    cur, skipped, held = None, [], None
+    for r in valid_reviews:
+        if (cur is not None and (cur.get("verdict") or "").strip().lower() == "needs-fix"
+                and reviewer_rank(r) < reviewer_rank(cur)):
+            skipped.append(r)
+            held = cur
+            continue
+        cur = r
+    if held is not None and held is not cur:
+        held = None
+    return cur, skipped, held
+
+
+def claude_guard_observed(target, hid, rid):
+    """claude-<H>.done 記的守門心跳：有對應這份 R 的 .done 才判斷（True／False）；沒有 .done 或不是這份 R → None。"""
+    d = load_json(Path(target) / ".ai-review" / ".cache" / f"claude-{hid}.done", None)
+    if not isinstance(d, dict) or d.get("review") != rid or "guard_calls" not in d:
+        return None
+    try:
+        return int(d.get("guard_calls") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def derive_state(target, with_fp=True):
     initialized, init_reason = config_initialized(target)
     installed = manifest_path(target).exists()
@@ -1183,9 +1269,15 @@ def derive_state(target, with_fp=True):
     valid_reviews = [r for r in valid_reviews if r not in self_reviews]
     if self_reviews:
         st["notes"].append(f"{len(self_reviews)} 份審查的 reviewer 是開發 AI 自己（{', '.join(r['id'] for r in self_reviews)}），不算獨立審查")
-    R = valid_reviews[-1] if valid_reviews else None
+    R, skipped, held = pick_review(valid_reviews)
     if R:
-        st["review"] = {k: R.get(k) for k in ("id", "verdict", "reviewer", "blocking", "created", "handoff", "target")}
+        st["review"] = {k: R.get(k) for k in ("id", "verdict", "reviewer", "blocking", "created", "handoff", "target",
+                                              "reviewer_model", "reviewer_isolation")}   # 後兩欄 0.5.0；沒有就 None
+        # 隔離 Claude 審查：claude-review --end 記下守門心跳 0 筆 → False（狀態標「守門未生效」）；沒收尾或不是 Claude → None
+        st["review"]["guard_observed"] = claude_guard_observed(target, H.get("id"), R.get("id")) if is_claude_reviewer(R) else None
+    if held is not None:
+        st["notes"].append(f"此交接曾被 {held.get('id')}（{held.get('reviewer')}）判需修正，較弱的審查員不能推翻；"
+                           f"重審請用 Codex 或修正後重新交接（未採用：{', '.join(r.get('id') for r in skipped)}）")
     fx = [f for f in fs if f.get("handoff") == H.get("id")
           or (R and f.get("review") == R.get("id"))
           or (H.get("recheck_of") and f.get("review") == H.get("recheck_of"))]
@@ -1212,7 +1304,8 @@ def derive_state(target, with_fp=True):
     st["bound_status"] = bound_status
     # 未結案
     if status == "pending-review":
-        st["open_items"].append(f"交接 {H.get('id')} 等待獨立審查（kit.py codex-review 背景啟動，或手動在 Codex 打 $independent-review）")
+        st["open_items"].append(f"交接 {H.get('id')} 等待獨立審查（兩條路線擇一：隔離 Claude＝kit.py claude-review --begin {H.get('id')} 後派 "
+                                f"independent-reviewer 子代理、回來跑 --end；或 Codex＝kit.py codex-review 背景啟動，或手動在 Codex 打 $independent-review）")
     elif status == "pending-recheck":
         st["open_items"].append(f"交接 {H.get('id')} 為修正後重交（回應 {H.get('recheck_of')}），等待複查")
     elif status == "needs-fix":
@@ -1220,6 +1313,23 @@ def derive_state(target, with_fp=True):
     elif status == "not-ready" and hs:
         st["open_items"].append(f"交接 {H.get('id')} 已過期（原狀態：{STATUS_LABELS[bound_status]}），完成變更後請重新 /review-ready")
     return st
+
+
+def is_claude_reviewer(review):
+    return bool(review) and (review.get("reviewer") or "").strip().lower() == CLAUDE_REVIEWER
+
+
+def verdict_text(review):
+    """結論文字；隔離 Claude 審查在結論後標「（非 Codex 審查）」，收尾時守門沒有執行紀錄再標「守門未生效」
+    （status／state／SessionStart 共用）。"""
+    if not is_claude_reviewer(review):
+        return f"{review.get('verdict')}"
+    return f"{review.get('verdict')}" + (GUARD_OFF_MARK if review.get("guard_observed") is False else NON_CODEX_MARK)
+
+
+def reviewer_text(review):
+    m = review.get("reviewer_model")
+    return f"{review.get('reviewer')}" + (f"（模型 {m}）" if m and is_claude_reviewer(review) else "")
 
 
 def state_output(target):
@@ -1255,7 +1365,7 @@ def print_state(out):
               (f"  複查自 {h.get('recheck_of')}" if h.get("recheck_of") else ""))
     if out.get("review"):
         r = out["review"]
-        print(f"對應審查：{r.get('id')}  結論 {r.get('verdict')}  審查者 {r.get('reviewer')}")
+        print(f"對應審查：{r.get('id')}  結論 {verdict_text(r)}  審查者 {reviewer_text(r)}")
     for n in out.get("notes", []):
         print(f"註：{n}")
     for o in out.get("open_items", []):
@@ -1305,12 +1415,62 @@ def do_gate(args):
         return 1
     out = derive_and_write_state(target, quiet=True)
     print_state(out)
+    hist = review_history_line(target)
+    if hist:
+        print(hist)
     if out["status"] == "no-blocking-found" and out.get("fresh"):
+        need = getattr(args, "require_reviewer", None)
+        rv = out.get("review") or {}
+        who = (rv.get("reviewer") or "").strip().lower()
+        if need and who != need:
+            print(f"\n關卡：不成立——發版前需 Codex 審查（--require-reviewer {need}）。最新有效審查 "
+                  f"{rv.get('id')} 的審查者是 {who or '空'}"
+                  + (NON_CODEX_MARK if who == CLAUDE_REVIEWER else "") + "。用 kit.py codex-review 送 Codex 審同一份交接後再跑 gate。")
+            return 1
+        if need == "codex":
+            # 報告檔頭的 reviewer 是審查者自己寫的（RV-2）：用本機紀錄核對。.cache 不進版控，所以這是本機關卡。
+            # ① 有 codex-review 的執行紀錄：要指向這份報告。② 沒有（手動開 Codex 審＝正式退路）：這份報告若出現在
+            #    隔離 Claude 審查員的守門寫檔紀錄裡＝冒充 Codex，擋；否則依檔頭採信並提示（守門沒生效時分辨不出）。
+            hid = (out.get("handoff") or {}).get("id")
+            rid = rv.get("id")
+            d = load_json(target / ".ai-review" / ".cache" / f"codex-{hid}.done", None)
+            if isinstance(d, dict):
+                if d.get("review") != rid:
+                    print(f"\n關卡：不成立——審查 {rid} 檔頭寫 codex，但 codex-review 的執行紀錄"
+                          f"（.ai-review/.cache/codex-{hid}.done）指向的是 {d.get('review')}，不是這份。"
+                          "用 kit.py codex-review 重送審，或確認這份報告是誰寫的。")
+                    return 1
+            else:
+                fname = next((r.get("_file") for r in reports(target, "reviews") if r.get("id") == rid), None) or f"{rid}.md"
+                if _name_key(fname) in guard_written_files(target):
+                    print(f"\n關卡：不成立——審查 {rid} 檔頭寫 codex，但守門紀錄（.ai-review/.cache/claude-*.guard.jsonl）顯示"
+                          f"這個檔是隔離 Claude 審查員寫的：冒充 Codex 審查，不放行。用 kit.py codex-review 送 Codex 審。")
+                    return 1
+                print("未見 codex-review 執行紀錄（手動開 Codex 審查），依報告檔頭採信；守門沒生效時無法分辨")
         print("\n關卡：通過條件成立——最新交接已有獨立審查「本次範圍內未發現阻擋問題」，且指紋相符。")
         print("提醒：這是本地檢查，可被略過；遠端保護規則要另外在 GitHub 設定。")
         return 0
     print("\n關卡：不成立。合併／部署前需要：有效交接 + 獨立審查結論為 no-blocking-found + 指紋相符。")
     return 1
+
+
+def review_history_line(target):
+    """最新交接的審查歷程一行（gate 用）：照編號列 R、審查者、結論，未採用的標出來。沒有審查回 None。"""
+    hs = reports(target, "handoffs")
+    if not hs:
+        return None
+    H = hs[-1]
+    rs = [r for r in reports(target, "reviews") if r.get("handoff") == H.get("id") and r.get("target") == H.get("target")]
+    if not rs:
+        return None
+    valid = [r for r in rs if (r.get("reviewer") or "").lower() not in SELF_REVIEWERS]
+    R, skipped, _ = pick_review(valid)
+    parts = []
+    for r in rs:
+        tag = ("（自查，不算）" if r not in valid else "（未採用：較弱的審查員不能推翻需修正）" if r in skipped
+               else "（採用）" if r is R else "")
+        parts.append(f"{r.get('id')} {r.get('reviewer') or '空'} {r.get('verdict') or '空'}{tag}")
+    return f"審查歷程（交接 {H.get('id')}）：" + " → ".join(parts)
 
 
 def do_new_id(args):
@@ -1476,44 +1636,137 @@ def codex_review_cmd(codex, target, hid, is_git, overrides=(), perm=LEGACY_SANDB
     return cmd
 
 
+# ---------------------------------------------------------------- 審查共用：拒絕條件、.running、審前快照、審後比對、.done（0.5.0 從 codex-review 抽出）
+def review_precheck(target, hid_arg, again, invalid_who):
+    """codex-review 與 claude-review --begin 共用的拒絕條件。回傳 (exit 碼或 None, H, st)；exit 碼不是 None 就照它結束。
+    invalid_who：指紋不符時的說法（「Codex 會判 invalid」／「審查員會判 invalid」）。"""
+    hs = reports(target, "handoffs")
+    if not hs:
+        print("沒有交接報告：先執行 /review-ready 產生交接，再啟動審查。")
+        return 2, None, None
+    H = next((h for h in hs if h.get("id") == hid_arg), None) if hid_arg else hs[-1]
+    if not H:
+        print(f"找不到交接 {hid_arg}")
+        return 2, None, None
+    hid = H["id"]
+    if not HID_RE.match(hid):
+        print(f"交接編號格式不對（{hid}），不啟動。")
+        return 2, None, None
+    if H is not hs[-1]:
+        print(f"交接 {hid} 不是最新的一份（最新是 {hs[-1]['id']}），狀態只看最新交接，不啟動。")
+        return 2, None, None
+    st = derive_state(target)
+    if not st["fresh"]:
+        print(f"目前程式碼與交接 {hid} 的目標指紋不符（交接後又改過），{invalid_who}。先重新 /review-ready。")
+        return 1, None, None
+    if st.get("review") and not again:
+        r = st["review"]
+        print(f"交接 {hid} 已有獨立審查 {r.get('id')}（結論 {r.get('verdict')}）。要重審請加 --again。")
+        return 1, None, None
+    return None, H, st
+
+
+def review_paths(target, hid, prefix):
+    """(.cache, log, done, running)；prefix＝codex／claude。"""
+    cache = target / ".ai-review" / ".cache"
+    return (cache,) + tuple(cache / f"{prefix}-{hid}.{ext}" for ext in ("log", "done", "running"))
+
+
+def review_busy(target, hid, running, shown, timeout_s, again):
+    """.running 還在、而且沒逾時 → 印提醒、回傳 True。shown＝提醒裡要給人看的紀錄檔。"""
+    if running.exists() and not again:
+        age = time.time() - running.stat().st_mtime
+        if age < timeout_s:
+            print(f"交接 {hid} 的審查已在執行（{int(age // 60)} 分鐘前啟動，紀錄 {rel(shown, target)}）。確定沒在跑才加 --again。")
+            return True
+    return False
+
+
+def review_begin(target, hid, is_git, done, running, keep_listing=False, extra=None):
+    """審前：清掉舊 .done、取審前清單（指紋同一套收檔規則＋字面環境變數資料夾＋淺層清單）、寫 .running。
+    keep_listing=True 把審前清單一起寫進 .running（claude-review 的 --begin 與 --end 是兩個程序，要靠檔案接力）。
+    回傳 pre（審後比對用）。"""
+    done.unlink(missing_ok=True)
+    try:
+        before, list_err = workspace_listing(target, is_git), None     # 審前清單：抓審查期間多出來或被改的檔（2026-10-11 新增）
+    except Exception as e:
+        before, list_err = None, str(e)
+    pre = {"git": is_git, "before": before, "list_err": list_err, "env_dirs_before": literal_env_dirs(target),
+           "shallow_before": sorted(shallow_listing(target)), "started": now_str(),
+           # 審前的審查報告清單（檔名＋雜湊）：只收這次新寫的 R、抓舊 R 被改或刪（RV-2／RV-3／RV-4）
+           "reviews_before": reviews_listing(target)}
+    rec = {"handoff": hid, "pid": os.getpid(), "started": pre["started"]}
+    if extra:
+        rec.update(extra)
+    if keep_listing:
+        rec.update(pre)
+    write_text(running, json.dumps(rec, ensure_ascii=False) + "\n")
+    return pre
+
+
+def review_end(target, pre, out, info, done, log=None, again_hint="`codex-review --again`"):
+    """審後比對（多出或改動的檔只警告、不刪）＋寫 .done。info 由呼叫端先填好基本欄位，這裡補警告欄位。回傳警告行。"""
+    warn = []
+    ch = None
+    if pre.get("before") is None:
+        warn.append(f"審前工作區清單沒取到（{(pre.get('list_err') or '')[:200]}），沒辦法比對審查期間有沒有多出檔案。")
+    else:
+        try:
+            ch = workspace_changes(pre["before"], workspace_listing(target, pre.get("git")))
+        except Exception as e:
+            ch = None
+            warn.append(f"審後工作區清單沒取到（{str(e)[:200]}），沒辦法比對。")
+        if ch and any(ch.values()):
+            info["workspace_changes"] = {k: v[:200] for k, v in ch.items()}
+            n = sum(len(v) for v in ch.values())
+            warn.append(f"⚠️ 審查期間工作區有 {n} 個檔變了（不含 .ai-review/，照 .gitignore）：指紋可能漂移，先看是什麼再決定"
+                        "（例如審查沙箱留下的字面「%SystemDrive%\\」資料夾）。kit 不會自動刪任何檔。")
+            for label, key in (("新增", "added"), ("修改", "modified"), ("刪除", "removed")):
+                for p in ch[key][:20]:
+                    warn.append(f"  {label}：{p}")
+                if len(ch[key]) > 20:
+                    warn.append(f"  …{label}共 {len(ch[key])} 個，完整清單見 {rel(done, target)}")
+    new_env_dirs = [d for d in literal_env_dirs(target) if d not in (pre.get("env_dirs_before") or [])]
+    if new_env_dirs:
+        info["literal_env_dirs"] = new_env_dirs
+        warn.append(f"⚠️ 審查期間專案根目錄出現字面名稱的資料夾：{'、'.join(new_env_dirs)}——沙箱裡少了對應的環境變數"
+                    "（被 .gitignore 排除時不影響指紋，但表示環境變數沒帶進去）。kit 不會自動刪。")
+    shallow_new = new_shallow_entries(set(pre.get("shallow_before") or []), shallow_listing(target), ch, new_env_dirs)
+    if shallow_new:
+        info["new_ignored_entries"] = shallow_new[:200]
+        warn.append(f"⚠️ 審查期間專案根目錄或第一層資料夾多了 {len(shallow_new)} 項（多半在 .gitignore 排除的位置，例如個人資料夾；"
+                    "不算進指紋，但審查不該寫到那裡）。先看是什麼再決定；kit 不會自動刪。")
+        for e in shallow_new[:20]:
+            warn.append(f"  新增：{e}")
+        if len(shallow_new) > 20:
+            warn.append(f"  …共 {len(shallow_new)} 項，完整清單見 {rel(done, target)}")
+    if out.get("fresh") is False:
+        info["fingerprint_drift"] = True
+        warn.append(f"⚠️ 目前指紋 {short(out.get('current_fingerprint'))} 與交接目標 {short((out.get('handoff') or {}).get('target'))} 不符，"
+                    f"狀態已回到「尚未準備」；先看上面列的檔是什麼，再決定清掉後 {again_hint}，或重新 /review-ready。")
+    if warn:
+        info["warnings"] = warn
+        if log is not None:
+            with open(log, "ab") as lf:
+                lf.write(("\n[ai-review-kit 審後檢查]\n" + "\n".join(warn) + "\n").encode("utf-8"))
+    dump_json(done, info)
+    return warn
+
+
 def do_codex_review(args):
     target = resolve_target(args)
     if not (target / ".ai-review").is_dir():
         raise SystemExit("找不到 .ai-review/：請先安裝套件。")
-    hs = reports(target, "handoffs")
-    if not hs:
-        print("沒有交接報告：先執行 /review-ready 產生交接，再啟動審查。")
-        return 2
-    hid = getattr(args, "handoff", None)
-    H = next((h for h in hs if h.get("id") == hid), None) if hid else hs[-1]
-    if not H:
-        print(f"找不到交接 {hid}")
-        return 2
+    code, H, st = review_precheck(target, getattr(args, "handoff", None), args.again, "Codex 會判 invalid")
+    if code is not None:
+        return code
     hid = H["id"]
-    if not HID_RE.match(hid):
-        print(f"交接編號格式不對（{hid}），不啟動。")
-        return 2
-    if H is not hs[-1]:
-        print(f"交接 {hid} 不是最新的一份（最新是 {hs[-1]['id']}），狀態只看最新交接，不啟動。")
-        return 2
-    st = derive_state(target)
-    if not st["fresh"]:
-        print(f"目前程式碼與交接 {hid} 的目標指紋不符（交接後又改過），Codex 會判 invalid。先重新 /review-ready。")
-        return 1
-    if st.get("review") and not args.again:
-        r = st["review"]
-        print(f"交接 {hid} 已有獨立審查 {r.get('id')}（結論 {r.get('verdict')}）。要重審請加 --again。")
-        return 1
 
-    cache = target / ".ai-review" / ".cache"
+    cache, log, done, running = review_paths(target, hid, "codex")
     tmp = cache / "tmp"
-    log, done, running = (cache / f"codex-{hid}.{ext}" for ext in ("log", "done", "running"))
     timeout_s = max(1, args.timeout) * 60
-    if running.exists() and not args.again:
-        age = time.time() - running.stat().st_mtime
-        if age < timeout_s:
-            print(f"交接 {hid} 的審查已在執行（{int(age // 60)} 分鐘前啟動，紀錄 {rel(log, target)}）。確定沒在跑才加 --again。")
-            return 1
+    if review_busy(target, hid, running, log, timeout_s, args.again):
+        return 1
 
     codex = shutil.which(args.codex or "codex")
     if not codex:
@@ -1575,15 +1828,8 @@ def do_codex_review(args):
 
     if alias:
         print(f"⚠️ 目前的 Python 是應用程式別名（{py}），Codex 沙箱裡的指紋核對可能失敗。")
-    done.unlink(missing_ok=True)
-    try:
-        before = workspace_listing(target, st["git"])     # 審前清單：審後比對，抓審查期間多出來或被改的檔（2026-10-11 新增）
-    except Exception as e:
-        before, list_err = None, str(e)
-    env_dirs_before = literal_env_dirs(target)
-    shallow_before = shallow_listing(target)
-    started = now_str()
-    write_text(running, json.dumps({"handoff": hid, "pid": os.getpid(), "started": started}, ensure_ascii=False) + "\n")
+    pre = review_begin(target, hid, st["git"], done, running)
+    started = pre["started"]
     print(f"Codex 審查交接 {hid} 開始（{started}），紀錄寫到 {rel(log, target)}")
     print(f"沙箱權限：{perm_note}")
     for n in ov_notes:
@@ -1600,53 +1846,16 @@ def do_codex_review(args):
     finally:
         running.unlink(missing_ok=True)
     out = derive_and_write_state(target, quiet=True)
-    r = out.get("review") if (out.get("handoff") or {}).get("id") == hid else None
+    # 只收這次新寫、reviewer＝codex、對應這份交接的 R（RV-4：Codex 失敗時不把別的審查員的舊報告報成 Codex 的結果）
+    added, _, _ = reviews_changed(target, pre["reviews_before"])
+    mine = [f for _, f in new_reports_of(target, added)
+            if f and f.get("id") and f.get("handoff") == hid and f.get("target") == H.get("target")
+            and (f.get("reviewer") or "").strip().lower() == "codex"]
+    r = sorted(mine, key=lambda x: x.get("id", ""))[-1] if mine else None
     info = {"handoff": hid, "exit": code, "started": started, "finished": now_str(),
             "review": r.get("id") if r else None, "verdict": r.get("verdict") if r else None,
             "sandbox_env": ov_notes, "permissions": perm_info}
-    warn = []
-    ch = None
-    if before is None:
-        warn.append(f"審前工作區清單沒取到（{list_err[:200]}），沒辦法比對審查期間有沒有多出檔案。")
-    else:
-        try:
-            ch = workspace_changes(before, workspace_listing(target, st["git"]))
-        except Exception as e:
-            ch = None
-            warn.append(f"審後工作區清單沒取到（{str(e)[:200]}），沒辦法比對。")
-        if ch and any(ch.values()):
-            info["workspace_changes"] = {k: v[:200] for k, v in ch.items()}
-            n = sum(len(v) for v in ch.values())
-            warn.append(f"⚠️ 審查期間工作區有 {n} 個檔變了（不含 .ai-review/，照 .gitignore）：指紋可能漂移，先看是什麼再決定"
-                        "（例如審查沙箱留下的字面「%SystemDrive%\\」資料夾）。kit 不會自動刪任何檔。")
-            for label, key in (("新增", "added"), ("修改", "modified"), ("刪除", "removed")):
-                for p in ch[key][:20]:
-                    warn.append(f"  {label}：{p}")
-                if len(ch[key]) > 20:
-                    warn.append(f"  …{label}共 {len(ch[key])} 個，完整清單見 {rel(done, target)}")
-    new_env_dirs = [d for d in literal_env_dirs(target) if d not in env_dirs_before]
-    if new_env_dirs:
-        info["literal_env_dirs"] = new_env_dirs
-        warn.append(f"⚠️ 審查期間專案根目錄出現字面名稱的資料夾：{'、'.join(new_env_dirs)}——沙箱裡少了對應的環境變數"
-                    "（被 .gitignore 排除時不影響指紋，但表示環境變數沒帶進去）。kit 不會自動刪。")
-    shallow_new = new_shallow_entries(shallow_before, shallow_listing(target), ch, new_env_dirs)
-    if shallow_new:
-        info["new_ignored_entries"] = shallow_new[:200]
-        warn.append(f"⚠️ 審查期間專案根目錄或第一層資料夾多了 {len(shallow_new)} 項（多半在 .gitignore 排除的位置，例如個人資料夾；"
-                    "不算進指紋，但審查不該寫到那裡）。先看是什麼再決定；kit 不會自動刪。")
-        for e in shallow_new[:20]:
-            warn.append(f"  新增：{e}")
-        if len(shallow_new) > 20:
-            warn.append(f"  …共 {len(shallow_new)} 項，完整清單見 {rel(done, target)}")
-    if out.get("fresh") is False:
-        info["fingerprint_drift"] = True
-        warn.append(f"⚠️ 目前指紋 {short(out.get('current_fingerprint'))} 與交接目標 {short((out.get('handoff') or {}).get('target'))} 不符，"
-                    "狀態已回到「尚未準備」；先看上面列的檔是什麼，再決定清掉後 `codex-review --again`，或重新 /review-ready。")
-    if warn:
-        info["warnings"] = warn
-        with open(log, "ab") as lf:
-            lf.write(("\n[ai-review-kit 審後檢查]\n" + "\n".join(warn) + "\n").encode("utf-8"))
-    dump_json(done, info)
+    warn = review_end(target, pre, out, info, done, log=log)
     print(f"Codex 結束（exit {code}）。")
     for w in warn:
         print(w)
@@ -1658,8 +1867,212 @@ def do_codex_review(args):
     return 1
 
 
+# ---------------------------------------------------------------- 隔離 Claude 審查員（0.5.0）
+MODEL_ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$")
+# 派審查員的 prompt：與 review-ready skill 第 11A 步的四行是同一份（RV-10）；路徑一律正斜線（RV-7：bash 會吃掉沒加引號的反斜線）
+CLAUDE_REVIEW_PROMPT_LINES = ("專案：{target}",
+                              "交接：{hid}",
+                              "reviewer_model：{model}",
+                              "請依 {target}/.ai-review/kit/review-spec.md 審查這份交接；報告檔頭 reviewer 寫 "
+                              + CLAUDE_REVIEWER + "、reviewer_model 寫上面的別名。")
+
+
+def claude_review_prompt(target, hid, model="<別名>"):
+    return "\n".join(x.format(target=Path(target).as_posix(), hid=hid, model=model) for x in CLAUDE_REVIEW_PROMPT_LINES)
+
+
+def guard_log_path(target, hid):
+    """守門心跳紀錄：.ai-review/.cache/claude-<H>.guard.jsonl（每次守門被呼叫追加一行：時間、工具名、放行／擋下）。"""
+    return Path(target) / ".ai-review" / ".cache" / f"claude-{hid}.guard.jsonl"
+
+
+def guard_log_count(target, hid):
+    try:
+        with open(guard_log_path(target, hid), "rb") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+
+def do_claude_review(args):
+    """隔離 Claude 子代理審查的開始與收尾。子代理由開發端（Claude Code 的 Agent 工具）派，kit 只管前後：
+    --begin：拒絕條件同 codex-review → 寫 .cache/claude-<H>.running（pid、開始時間、審前工作區清單、審前報告清單）、
+             清空守門心跳 claude-<H>.guard.jsonl → 印派工資訊。
+    --end：只收這次新寫、reviewer=claude-isolated 且 handoff／target 相符的 R → 舊 R 被改刪或新 R 的 reviewer 不對 → exit 1；
+           守門心跳 0 筆 → 顯眼警告（照收、標守門未生效）→ 審後比對（只警告、不刪）→ 寫 .done → 推導狀態。"""
+    target = resolve_target(args)
+    if not (target / ".ai-review").is_dir():
+        raise SystemExit("找不到 .ai-review/：請先安裝套件。")
+    if args.begin:
+        return claude_review_begin(target, args)
+    return claude_review_end(target, args)
+
+
+def claude_review_begin(target, args):
+    code, H, st = review_precheck(target, args.begin, args.again, "審查員會判 invalid")
+    if code is not None:
+        return code
+    hid = H["id"]
+    cache, log, done, running = review_paths(target, hid, "claude")
+    timeout_s = max(1, args.timeout) * 60
+    if review_busy(target, hid, running, running, timeout_s, args.again):
+        return 1
+    kit_py = (target / ".ai-review" / "kit" / "kit.py").as_posix()
+    glog = guard_log_path(target, hid)
+    if args.print_only:
+        print("（--print：只顯示會做什麼，沒有寫任何檔）")
+        print(f"將寫：{rel(running, target)}（pid、開始時間、審前工作區清單、審前報告清單）；清空 {rel(glog, target)}；"
+              f"清掉舊的 {rel(done, target)}")
+    else:
+        review_begin(target, hid, st["git"], done, running, keep_listing=True, extra={"reviewer": CLAUDE_REVIEWER})
+        write_text(glog, "")     # 守門心跳從這次開始算
+        print(f"已記下審查開始：{rel(running, target)}")
+    print(f"可派審查員：交接 {hid}")
+    print(f"專案（絕對路徑）：{target.as_posix()}")
+    print("模型建議：用與開發 AI 不同的別名——開發 AI 是 opus 就填 fable，否則填 opus（Agent 工具的 model 參數）。")
+    print("派法：Agent 工具 subagent_type: independent-reviewer、model: <別名>、背景執行；prompt 只寫下面四行（<別名> 換成實際別名，"
+          "不附開發摘要）：")
+    for line in claude_review_prompt(target, hid).splitlines():
+        print("  " + line)
+    print(f"審查員回報後：py -3 \"{kit_py}\" claude-review --end {hid} --model <別名>")
+    print("審查員受守門 hook（kit.py hook review-guard）限制：只能新寫 .ai-review/reviews/R-*.md、只能跑白名單命令；"
+          "守門要生效，專案資料夾要在 Claude Code 開過並接受信任、Claude Code 要開在專案根目錄"
+          "（或 reviewer-agent --session-root 指定的上層資料夾；開在子資料夾守門找不到 kit.py，會全部擋下）。")
+    return 0
+
+
+def claude_review_end(target, args):
+    hid = args.end
+    if not HID_RE.match(hid or ""):
+        print(f"交接編號格式不對（{hid}）。")
+        return 2
+    model = (args.model or "").strip()
+    if not model:
+        print("--end 要加 --model <別名>（派審查員時用的模型別名，例如 fable 或 opus）。")
+        return 2
+    if not MODEL_ALIAS_RE.match(model):
+        print(f"模型別名「{model}」不接受：只收英數字與 . _ : - [ ]，最長 64 字。")
+        return 2
+    cache, log, done, running = review_paths(target, hid, "claude")
+    if not running.exists():
+        print(f"沒有交接 {hid} 的審查開始紀錄（{rel(running, target)} 不存在）：先跑 claude-review --begin {hid}，再派審查員。")
+        return 2
+    rec = load_json(running, None)
+    if not isinstance(rec, dict) or rec.get("handoff") != hid:
+        print(f"{rel(running, target)} 內容讀不懂或不是這份交接的：重新 claude-review --begin {hid} --again。")
+        return 2
+    H = next((h for h in reports(target, "handoffs") if h.get("id") == hid), None)
+    if not H:
+        print(f"找不到交接 {hid}")
+        return 2
+    before_rv = rec.get("reviews_before")
+    if not isinstance(before_rv, dict):
+        print(f"{rel(running, target)} 是舊版的開始紀錄（沒有審前報告清單），分不出哪份報告是這次寫的："
+              f"重新 claude-review --begin {hid} --again 再派審查員。")
+        return 2
+    # 只收這次新寫的報告（RV-3）；審前已有的報告被改或刪、新報告的 reviewer 不是 claude-isolated → exit 1（RV-2）
+    added, modified, removed = reviews_changed(target, before_rv)
+    new_rs = new_reports_of(target, added)
+    wrong = [f"{n}（reviewer {(f or {}).get('reviewer') or '空'}）" for n, f in new_rs
+             if not f or (f.get("reviewer") or "").strip().lower() != CLAUDE_REVIEWER]
+    problems = []
+    if modified or removed:
+        problems.append("⚠️ 審查期間，審查開始前就有的審查報告被改或被刪（審查員只准新寫報告）："
+                        + "、".join([f"改：{n}" for n in modified] + [f"刪：{n}" for n in removed])
+                        + "。先人工核對這些報告（git diff／備份），kit 不會自動還原。")
+    if wrong:
+        problems.append("⚠️ 審查期間新寫的報告 reviewer 不是 " + CLAUDE_REVIEWER + "：" + "、".join(wrong)
+                        + "（隔離審查員只能寫 reviewer: " + CLAUDE_REVIEWER + "）。先人工看這些報告是誰寫的，kit 不會自動刪。")
+    cands = sorted((f for n, f in new_rs if f and f.get("id") and f.get("handoff") == hid and f.get("target") == H.get("target")
+                    and (f.get("reviewer") or "").strip().lower() == CLAUDE_REVIEWER), key=lambda x: x.get("id", ""))
+    if not cands:
+        print(f"這次沒有新的審查報告：審查開始後，.ai-review/reviews/ 沒有新寫 reviewer: {CLAUDE_REVIEWER}、"
+              f"handoff: {hid}、target 與交接相同的 R 報告（審查開始前就有的報告不算）。")
+        others = [f"{n}（{'讀不懂檔頭' if not f else 'reviewer ' + (f.get('reviewer') or '空') + '、handoff ' + (f.get('handoff') or '空')}）"
+                  for n, f in new_rs]
+        if others:
+            print("這次新寫、但不算這次隔離審查的報告：" + "、".join(others))
+        for p in problems:
+            print(p)
+        print("看審查員子代理的回報找原因（守門未生效而停止、被守門擋下、額度不足、指紋不符…）；"
+              "補好 R 報告後再跑一次 --end（審查開始紀錄還留著）。")
+        return 1
+    R = cands[-1]
+    v_raw = (R.get("verdict") or "").strip().lower()
+    if v_raw not in ("needs-fix", "no-blocking-found", "invalid"):
+        # 2026-11-01 真 Claude Code 實跑：審查員寫了 verdict: blocked，舊版照收、exit 0，狀態卻是「待獨立審查」。
+        print(f"審查報告 {R['id']} 的 verdict 是「{R.get('verdict') or '空'}」，不是 needs-fix／no-blocking-found／invalid，"
+              "kit 會當成沒審過，所以這次不收尾。")
+        for p in problems:
+            print(p)
+        print(f"下一步：再派一次審查員（不加 --again，它可以改這份這次新寫的報告），請它照範本把 verdict 改成三者之一；"
+              f"改好後再跑 claude-review --end {hid} --model {model}（審查開始紀錄還留著）。")
+        return 1
+    warn_model = []
+    rm = (R.get("reviewer_model") or "").strip()
+    if not rm:
+        warn_model.append(f"⚠️ 審查報告 {R['id']} 沒有 reviewer_model 欄；.done 記 --model 給的 {model}。")
+    elif rm.lower() != model.lower():
+        warn_model.append(f"⚠️ 審查報告 {R['id']} 的 reviewer_model 是 {rm}，與 --model {model} 不同；.done 記 --model 的值，請確認派工時用的模型。")
+    # 守門心跳（RV-1／V2-A）：審查員每次用工具，守門 hook 都會在 claude-<H>.guard.jsonl 記一行。0 筆＝守門沒有執行
+    guard_calls = guard_log_count(target, hid)
+    guard_warn = []
+    if guard_calls == 0:
+        guard_warn = [
+            "⚠️⚠️ 守門 hook 沒有執行紀錄：可能專案資料夾還沒被 Claude Code 信任（frontmatter hooks 會被略過）、或找不到 py；"
+            "本次審查沒有守門保護。",
+            "   審查內容照收，但狀態會標「（非 Codex 審查；守門未生效）」。下一步：跑 kit.py doctor 看審查員子代理那一列；"
+            "在專案根目錄開一次 Claude Code 並接受信任，再 claude-review --begin " + hid + " --again 重派；"
+            "或改送 Codex（kit.py codex-review --again）。",
+            "   守門沒生效時審查員的寫入與指令都沒被擋：下面若有工作區變動警告，逐條看過再決定。"]
+    if args.print_only:
+        print("（--print：只顯示會做什麼，沒有寫任何檔）")
+        print(f"找到審查報告：{R['id']}  結論 {verdict_text(dict(R, guard_observed=guard_calls > 0))}  "
+              f"審查者 {reviewer_text(dict(R, reviewer_model=rm or model))}")
+        print(f"守門心跳：{guard_calls} 筆")
+        print(f"將做：審後比對工作區（只警告、不刪）→ 寫 {rel(done, target)}（reviewer {CLAUDE_REVIEWER}、reviewer_model {model}、"
+              f"guard_calls {guard_calls}）→ 推導並寫 state.json → 清掉 {rel(running, target)}")
+        for w in warn_model + guard_warn + problems:
+            print(w)
+        return 1 if problems else 0
+    pre = {k: rec.get(k) for k in ("git", "before", "list_err", "env_dirs_before", "shallow_before")}
+    out0 = state_output(target)        # 先比對、.done 寫好後才寫 state.json（RV-6；狀態也才讀得到 guard_calls）
+    info = {"handoff": hid, "exit": None, "started": rec.get("started"), "finished": now_str(),
+            "review": R.get("id"), "verdict": R.get("verdict"), "sandbox_env": None, "permissions": None,
+            "reviewer": CLAUDE_REVIEWER, "reviewer_model": model,
+            "isolation": R.get("reviewer_isolation") if guard_calls else ISOLATION_NO_GUARD,
+            "guard_calls": guard_calls}
+    if warn_model:
+        info["model_note"] = warn_model
+    if problems:
+        info["review_integrity"] = {"modified": modified, "removed": removed, "wrong_reviewer": wrong}
+    warn = review_end(target, pre, out0, info, done, log=None, again_hint=f"`claude-review --begin {hid} --again` 重派審查員")
+    running.unlink(missing_ok=True)
+    out = derive_and_write_state(target, quiet=True)
+    print(f"隔離 Claude 審查結束：審查報告 {R['id']}  結論 {verdict_text(dict(R, guard_observed=guard_calls > 0))}"
+          f"（審查者 {CLAUDE_REVIEWER}，模型 {model}，守門心跳 {guard_calls} 筆）")
+    for w in guard_warn + problems + warn_model + warn:
+        print(w)
+    if (out.get("review") or {}).get("id") not in (None, R.get("id")):
+        print(f"注意：狀態採用的是 {(out.get('review') or {}).get('id')}，不是這份 {R['id']}（看下面的「註」）。")
+    print(f"結束標記：{rel(done, target)}")
+    print_state(out)
+    if problems:
+        print("結果：exit 1——審查報告區在審查期間有不該出現的變動（上面 ⚠️），這次結果先不要採信。")
+        return 1
+    return 0
+
+
 # ---------------------------------------------------------------- hooks
 def do_hook(args):
+    if args.event == "review-guard":
+        # 守門 hook 失敗要關閉（fail-closed）：讀不到 JSON、找不到專案、程式例外一律 exit 2 擋下。
+        # 與下面 session-start／stop 的「永不阻擋」相反——守門寧可多擋，不可漏放。
+        try:
+            return hook_review_guard(args)
+        except Exception as e:
+            print(f"[ai-review-kit 審查守門] 守門判斷不了，一律擋下（fail-closed）：{e}", file=sys.stderr)
+            return 2
     try:
         raw = sys.stdin.read() if not sys.stdin.isatty() else ""
         payload = json.loads(raw) if raw.strip() else {}
@@ -1689,7 +2102,7 @@ def hook_session_start(target, payload, agent="claude"):
         lines.append(f"- 最新交接：{st['handoff']['id']}，目標指紋 {short(st['handoff']['target'])}，"
                      f"與目前工作目錄{'相符' if st['fresh'] else '不符（程式碼已變更）'}")
     if st.get("review"):
-        lines.append(f"- 對應審查：{st['review']['id']}（{st['review']['verdict']}，審查者 {st['review']['reviewer']}）")
+        lines.append(f"- 對應審查：{st['review']['id']}（{verdict_text(st['review'])}，審查者 {reviewer_text(st['review'])}）")
     for o in st["open_items"]:
         lines.append(f"- 未結案：{o}")
     for n in st["notes"]:
@@ -1726,6 +2139,426 @@ def hook_stop(target, payload):
     msg = (f"[ai-review-kit] 交接 {H['id']} 已過期：程式碼在交接後變更（目標 {short(H['target'])} → 目前 {short(cur)}）。"
            f"先前狀態「{STATUS_LABELS[st.get('bound_status', 'not-ready')]}」不再適用。變更完成後請重新執行 /review-ready。（此提醒每個指紋只出現一次）")
     print(json.dumps({"systemMessage": msg}, ensure_ascii=False))
+    return 0
+
+
+# ---------------------------------------------------------------- 審查員守門 hook：review-guard（0.5.0）
+# 掛在審查員子代理定義的 hooks.PreToolUse（matcher 空＝全部工具）；Claude Code 每次工具呼叫前把 JSON 從 stdin 給我們。
+# exit 0＝放行（照一般權限流程）；exit 2＝擋下，stderr 的白話原因會給審查員看。
+# 專案從 kit.py 自己的位置找（project_root_from_here），不靠 hook 輸入的 cwd：巢狀專案時對話 cwd 是上層資料夾。
+# 守門只管 Claude 的工具層；Python 子程序（kit.py checks、config 第 4 節命令）寫檔由 claude-review --end 的審後比對抓。
+# 每次被呼叫，若有 claude-<H>.running（取最新一份）就在 claude-<H>.guard.jsonl 記一行心跳；--end 看到 0 筆＝守門沒執行（T-0199 W4）。
+# hook 起不來（找不到 py、資料夾未信任）時 Claude Code 照樣執行工具，這裡管不到——靠心跳、審查員第 0 步自檢與 onFailure: block 補。
+GUARD_READ_TOOLS = {"Read", "Grep", "Glob"}
+GUARD_PASS_TOOLS = {"SubagentHandback"}     # 子代理交最後回報的工具，不碰檔案（V2-B：擋了審查員就交不出回報）
+GUARD_EDIT_TOOLS = {"Edit", "Write", "MultiEdit"}
+GUARD_ALWAYS_BAD = (("&", "&"), (";", ";"), ("|", "|"), (">", ">"), ("<", "<"), ("`", "反引號"), ("$(", "$("),
+                    ("\n", "換行"), ("\r", "換行"), ("\0", "NUL 字元"))
+GUARD_UNQUOTED_BAD = set("(){}*?[]~!#")
+GIT_READ_SUBCMDS = {"diff", "show", "log", "status", "ls-files", "rev-parse", "cat-file"}
+# 能寫檔、執行外部程式或換掉 git 資料夾的長選項；git 接受唯一前綴縮寫（--outp＝--output），所以「是它們的前綴」就擋
+# show-signature 會執行 gpg.program（RV-9）。git 設定（core.fsmonitor 等）也可能叫外部程式，審查員改不到設定，文件註明
+GIT_BAD_LONG = ("output", "output-directory", "ext-diff", "textconv", "filters", "exec", "exec-path", "upload-pack",
+                "receive-pack", "open-files-in-pager", "config-env", "git-dir", "work-tree", "namespace", "paginate",
+                "show-signature")
+GUARD_PYTHONS = ("py", "python", "python3")
+R_FILE_RE = re.compile(r"^R-[A-Za-z0-9-]+\.md$", re.I)
+GUARD_KIT_SPEC = {   # 子命令 → (旗標, 帶值選項, 必帶旗標, 位置參數)
+    "verify": (set(), {"--handoff", "--target"}, (), ()),
+    "new-id": (set(), {"--target"}, (), ("R",)),
+    "state": ({"--no-write", "--json"}, {"--target"}, ("--no-write",), ()),
+    # checks 不准 --handoff：帶了會寫 .cache/checks-<H>.json，蓋掉開發端交接時的紀錄（小隊長 11-01 定）
+    "checks": ({"--run"}, {"--target"}, ("--run",), ()),
+}
+
+
+def guard_help(target):
+    reviews = Path(target) / ".ai-review" / "reviews"
+    return ("審查員能做的事：讀檔（Read／Grep／Glob）；只能寫 " + Path(reviews).as_posix() + " 底下的 R-*.md 審查報告"
+            "（Write 只能建新檔、Edit 只能改這次新寫的；開發端要先跑 claude-review --begin）；"
+            "Bash 只准：① git diff|show|log|status|ls-files|rev-parse|cat-file（可帶 -C 本專案、--no-pager；"
+            "不准 -c 與 --output、--ext-diff、--exec、--show-signature 這類能寫檔或執行外部程式的選項）"
+            "② py -3（或 python／python3）<本專案 .ai-review/kit/kit.py> verify｜new-id R｜state --no-write｜checks --run"
+            "（都可帶 --target 本專案；verify 可帶 --handoff；只有 state 可帶 --json）"
+            "③ config.md 第 4 節登記的檢查命令原文（多一個字都不行）。"
+            "不准串接或轉向（&& ; | > <、反引號、$( 、換行）。路徑一律用雙引號或正斜線。要檢查結果就跑 kit.py checks --run。")
+
+
+def guard_block(target, reason):
+    print(f"[ai-review-kit 審查守門] 擋下：{reason}。\n{guard_help(target)}", file=sys.stderr)
+    return 2
+
+
+def msys_to_win(p):
+    """Git Bash 風格 /c/xxx → C:/xxx（只在 Windows）。"""
+    if os.name == "nt":
+        m = re.match(r"^/([A-Za-z])(/.*)?$", p)
+        if m:
+            return f"{m.group(1).upper()}:{m.group(2) or '/'}"
+    return p
+
+
+def guard_abs(p, cwd):
+    """把命令或工具給的路徑轉成絕對 Path；相對路徑以 hook 輸入的 cwd 為準，沒有 cwd 回 None。"""
+    q = Path(msys_to_win(p))
+    if not q.is_absolute():
+        if not cwd:
+            return None
+        q = Path(cwd) / q
+    return q
+
+
+def same_path(a, b):
+    return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+
+
+def guard_split(cmd):
+    """照 bash 的引號與反斜線規則切參數（守門判斷的參數＝bash 真正交給程式的參數）。
+    未加引號的 ( ) { } * ? [ ] ~ ! #（子殼層、大括號展開、萬用字元、家目錄展開）一律不接受 → ValueError。"""
+    tokens, cur, in_tok, i, n = [], [], False, 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c in " \t":
+            if in_tok:
+                tokens.append("".join(cur))
+                cur, in_tok = [], False
+            i += 1
+            continue
+        in_tok = True
+        if c == "'":
+            j = cmd.find("'", i + 1)
+            if j < 0:
+                raise ValueError("單引號沒有關")
+            cur.append(cmd[i + 1:j])
+            i = j + 1
+        elif c == '"':
+            i += 1
+            while True:
+                if i >= n:
+                    raise ValueError("雙引號沒有關")
+                d = cmd[i]
+                if d == '"':
+                    i += 1
+                    break
+                if d == "\\" and i + 1 < n and cmd[i + 1] in '"\\$`':
+                    cur.append(cmd[i + 1])
+                    i += 2
+                    continue
+                cur.append(d)
+                i += 1
+        elif c == "\\":
+            if i + 1 >= n:
+                raise ValueError("命令結尾是反斜線")
+            cur.append(cmd[i + 1])
+            i += 2
+        elif c in GUARD_UNQUOTED_BAD:
+            raise ValueError(f"不能用未加引號的 {c}（子殼層、展開或萬用字元）")
+        else:
+            cur.append(c)
+            i += 1
+    if in_tok:
+        tokens.append("".join(cur))
+    return tokens
+
+
+def guard_edit(target, ti, cwd, tool="Edit", session=None):
+    """session＝最新一份 claude-<H>.running 的內容（沒有就 None）。路徑規則全過之後再看：
+    沒有開審紀錄 → 擋（強制先 --begin）；Write 只准還不存在的 R；Edit／MultiEdit 只准不在審前清單的 R（RV-2）。"""
+    why = guard_edit_path(target, ti, cwd)
+    if why:
+        return why
+    name = Path(msys_to_win(ti["file_path"])).name
+    if session is None:
+        return ("還沒有開審紀錄（.ai-review/.cache/claude-<H>.running）：開發端要先跑 kit.py claude-review --begin <H>，"
+                "審查員才能寫報告")
+    before = session.get("reviews_before")
+    if not isinstance(before, dict):
+        return "開審紀錄讀不懂或是舊版格式（沒有審前報告清單）：開發端要重跑 kit.py claude-review --begin <H> --again"
+    rp = guard_abs(ti["file_path"], cwd).resolve()
+    if tool == "Write":
+        if rp.exists():
+            return f"{name} 已經存在：Write 只能建新的審查報告；要改你這次寫的報告用 Edit"
+    elif any(_name_key(n) == _name_key(rp.name) for n in before):
+        return f"{name} 是審查開始前就有的報告，不准改（只能改你這次新寫的報告）"
+    return None
+
+
+def guard_edit_path(target, ti, cwd):
+    fp = ti.get("file_path")
+    if not isinstance(fp, str) or not fp.strip() or "\0" in fp:
+        return "沒有檔案路徑"
+    if any(x == ".." for x in re.split(r"[\\/]+", fp)):
+        return f"路徑含 ..（{fp}），不准跳出資料夾"
+    p = guard_abs(fp, cwd)
+    if p is None:
+        return f"相對路徑 {fp}，但 hook 輸入沒有 cwd，判斷不了在哪"
+    reviews = Path(target).resolve() / ".ai-review" / "reviews"
+    try:
+        real_reviews = reviews.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return f"{reviews} 不存在"
+    if os.path.normcase(str(real_reviews)) != os.path.normcase(str(reviews)):
+        return f"{reviews} 是連結，實際指到 {real_reviews}，不准寫"
+    if os.path.islink(p):
+        return f"{fp} 是符號連結，不准寫"
+    rp = p.resolve()
+    if os.path.normcase(str(rp.parent)) != os.path.normcase(str(reviews)):
+        return f"只能寫 {reviews} 底下的 R-*.md，{fp} 不在那裡"
+    if not (R_FILE_RE.match(p.name) and R_FILE_RE.match(rp.name)):
+        return f"檔名 {p.name} 不是 R-<編號>.md（只收英數字與 -）"
+    return None
+
+
+def guard_git(target, args, cwd):
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        if a == "-C":
+            if i + 1 >= len(args):
+                return "git -C 後面沒有路徑"
+            p = guard_abs(args[i + 1], cwd)
+            if p is None or not same_path(p, target):
+                return f"git -C 只能指本專案（{target}），收到 {args[i + 1]}"
+            i += 2
+            continue
+        if a in ("--no-pager", "-P"):
+            i += 1
+            continue
+        return f"git 的全域選項 {a} 不准（只准 -C 本專案、--no-pager；-c 設定一律不准）"
+    if i >= len(args):
+        return "git 沒有子命令"
+    sub = args[i]
+    if sub not in GIT_READ_SUBCMDS:
+        return f"git {sub} 不在唯讀白名單（{'、'.join(sorted(GIT_READ_SUBCMDS))}）"
+    for a in args[i + 1:]:
+        if a.startswith("--"):
+            name = a[2:].split("=", 1)[0].lower()
+            if name and any(f.startswith(name) for f in GIT_BAD_LONG):
+                return f"git 選項 {a} 不准（能寫檔或執行外部程式）"
+    return None
+
+
+def guard_kit(target, tokens, cwd):
+    if tokens[0] == "py":
+        if len(tokens) < 2 or tokens[1] != "-3":
+            return "py 要寫成 py -3"
+        rest = tokens[2:]
+    else:
+        rest = tokens[1:]
+    if not rest:
+        return "沒有指定 kit.py"
+    kp = guard_abs(rest[0], cwd)
+    mine = Path(target) / ".ai-review" / "kit" / "kit.py"
+    if kp is None or not mine.is_file() or not same_path(kp, mine):
+        return f"只能跑本專案的 kit.py（{mine}），收到 {rest[0]}"
+    if len(rest) < 2 or rest[1] not in GUARD_KIT_SPEC:
+        return f"kit.py {rest[1] if len(rest) > 1 else '（沒有子命令）'} 不在白名單（verify、new-id R、state --no-write、checks --run）"
+    sub = rest[1]
+    flags, valued, required, positional = GUARD_KIT_SPEC[sub]
+    seen, pos, j, opts = set(), [], 0, rest[2:]
+    while j < len(opts):
+        a = opts[j]
+        if a in flags:
+            seen.add(a)
+            j += 1
+        elif a in valued:
+            if j + 1 >= len(opts):
+                return f"{a} 後面沒有值"
+            v = opts[j + 1]
+            if a == "--target":
+                p = guard_abs(v, cwd)
+                if p is None or not same_path(p, target):
+                    return f"--target 只能是本專案（{target}），收到 {v}"
+            elif a == "--handoff" and not HID_RE.match(v):
+                return f"--handoff 的值 {v} 不是交接編號"
+            j += 2
+        elif a.startswith("-"):
+            return f"kit.py {sub} 不准帶 {a}"
+        else:
+            pos.append(a)
+            j += 1
+    if tuple(pos) != positional:
+        return f"kit.py {sub} 的參數不對（要 {' '.join(positional) or '無'}，收到 {' '.join(pos) or '無'}）"
+    missing = [x for x in required if x not in seen]
+    if missing:
+        return f"kit.py {sub} 一定要帶 {' '.join(missing)}"
+    return None
+
+
+def guard_bash(target, ti, cwd):
+    cmd = ti.get("command")
+    if not isinstance(cmd, str) or not cmd.strip():
+        return "沒有命令"
+    for bad, label in GUARD_ALWAYS_BAD:
+        if bad in cmd:
+            return f"命令含 {label}：不准串接、轉向或代換"
+    if any(cmd.strip() == r["command"].strip() for r in (parse_checks(target) or [])):
+        return None                                   # config.md 第 4 節登記的命令原文
+    if "$" in cmd:
+        return "命令含 $（變數展開），不准"
+    try:
+        tokens = guard_split(cmd)
+    except ValueError as e:
+        return str(e)
+    if not tokens:
+        return "沒有命令"
+    if tokens[0] == "git":
+        return guard_git(target, tokens[1:], cwd)
+    if tokens[0] in GUARD_PYTHONS:
+        return guard_kit(target, tokens, cwd)
+    return f"{tokens[0]} 不在白名單，也不是 config.md 第 4 節登記的命令原文"
+
+
+def guard_session(target):
+    """最新一份（修改時間）.ai-review/.cache/claude-<H>.running → (H, 內容 dict)。
+    沒有 → (None, None)；內容讀不懂 → (H, {})（寫入照樣擋：沒有審前清單）。"""
+    cache = Path(target) / ".ai-review" / ".cache"
+    runs = []
+    try:
+        for p in cache.glob("claude-*.running"):
+            hid = p.name[len("claude-"):-len(".running")]
+            if p.is_file() and HID_RE.match(hid):
+                runs.append((p.stat().st_mtime, hid, p))
+    except OSError:
+        pass
+    if not runs:
+        return None, None
+    _, hid, p = max(runs)
+    rec = load_json(p, None)
+    return hid, (rec if isinstance(rec, dict) else {})
+
+
+def guard_heartbeat(target, hid, tool, allowed, file_name=None):
+    """守門心跳：追加一行（時間、工具名、放行／擋下；放行的寫檔另記 R 檔名）；不記指令或檔案內容。寫不了不影響判斷。
+    寫檔紀錄給 gate --require-reviewer codex 認「這份自稱 codex 的報告其實是隔離 Claude 審查員寫的」。"""
+    rec = {"time": now_str(), "tool": (tool if isinstance(tool, str) else "?")[:64], "decision": "allow" if allowed else "block"}
+    if allowed and file_name and R_FILE_RE.match(file_name):
+        rec["file"] = file_name
+    line = json.dumps(rec, ensure_ascii=False)
+    try:
+        with open(guard_log_path(target, hid), "ab") as f:
+            f.write((line + "\n").encode("utf-8"))
+    except OSError:
+        pass
+
+
+def guard_decide(target, payload, session):
+    """回傳擋下的原因；放行回 None。"""
+    tool = payload.get("tool_name")
+    ti = payload.get("tool_input")
+    if not isinstance(tool, str) or not tool:
+        return "hook 輸入沒有 tool_name"
+    if tool in GUARD_READ_TOOLS or tool in GUARD_PASS_TOOLS:
+        return None
+    if not isinstance(ti, dict):
+        return "hook 輸入沒有 tool_input"
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    if tool in GUARD_EDIT_TOOLS:
+        return guard_edit(target, ti, cwd, tool, session)
+    if tool == "Bash":
+        return guard_bash(target, ti, cwd)
+    return f"工具 {tool} 不在審查員可用清單"
+
+
+def hook_review_guard(args):
+    raw = sys.stdin.buffer.read().decode("utf-8-sig")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("hook 輸入不是 JSON 物件")
+    target = project_root_from_here() or resolve_target(args)
+    if not (Path(target) / ".ai-review").is_dir():
+        raise ValueError(f"找不到專案（{target} 沒有 .ai-review/）")
+    hid, session = guard_session(target)
+    why = guard_decide(target, payload, session)
+    if hid:
+        tool, ti, fname = payload.get("tool_name"), payload.get("tool_input"), None
+        if why is None and tool in GUARD_EDIT_TOOLS and isinstance(ti, dict) and isinstance(ti.get("file_path"), str):
+            fname = Path(msys_to_win(ti["file_path"])).name
+        guard_heartbeat(target, hid, tool, why is None, fname)
+    return guard_block(target, why) if why else 0
+
+
+def guard_written_files(target):
+    """所有 .cache/claude-*.guard.jsonl 裡守門放行寫入的 R 檔名（Windows 不分大小寫）。"""
+    out = set()
+    try:
+        logs = list((Path(target) / ".ai-review" / ".cache").glob("claude-*.guard.jsonl"))
+    except OSError:
+        logs = []
+    for p in logs:
+        try:
+            for line in read_text(p).splitlines():
+                try:
+                    g = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(g, dict) and g.get("decision") == "allow" and isinstance(g.get("file"), str):
+                    out.add(_name_key(g["file"]))
+        except OSError:
+            continue
+    return out
+
+
+# ---------------------------------------------------------------- reviewer-agent：巢狀專案用的子代理定義（0.5.0）
+def do_reviewer_agent(args):
+    """子代理定義只從對話開始的資料夾往上找 .claude/agents/，hook 的 ${CLAUDE_PROJECT_DIR} 也是對話開始的資料夾。
+    專案在對話根底下（例：根目錄開對話、專案是 根\\秘書）時，把 hook 的 kit.py 路徑改成相對對話根的路徑。
+    預設印到 stdout；--out 才寫檔（已存在要 --force）。只寫相對路徑，不寫絕對路徑。"""
+    target = resolve_target(args)
+    if not (target / ".ai-review").is_dir():
+        print(f"找不到 .ai-review/：{target} 還沒安裝套件。", file=sys.stderr)
+        return 1
+    src = target / AGENT_DST_REL
+    if not src.is_file():
+        sr = source_root_from_here()
+        src = (sr / AGENT_SRC_REL) if sr else None
+    if not src or not src.is_file():
+        print(f"找不到審查員子代理定義（{target / AGENT_DST_REL} 不存在，套件來源也沒有）：先跑 kit.py update 補裝。", file=sys.stderr)
+        return 1
+    text = read_text(src)
+    if HOOK_KIT_PY not in text:
+        print(f"{src} 裡找不到 hook 路徑 {HOOK_KIT_PY}，無法改寫（檔案被改過？用 update --take-source {AGENT_DST_REL} 還原）。",
+              file=sys.stderr)
+        return 1
+    root = Path(args.session_root).resolve()
+    tp = target.resolve()
+    rp, tparts = root.parts, tp.parts
+    if len(tparts) < len(rp) or [os.path.normcase(x) for x in tparts[:len(rp)]] != [os.path.normcase(x) for x in rp]:
+        print(f"專案 {tp} 不在 --session-root {root} 底下：子代理定義放在對話根的 .claude/agents/，專案要在它底下。", file=sys.stderr)
+        return 2
+    rel_parts = tparts[len(rp):]
+    if any(re.search(r'["\\\x00-\x1f]', x) for x in rel_parts):
+        print("專案相對路徑含引號、反斜線或控制字元，不能寫進子代理定義。", file=sys.stderr)
+        return 2
+    rel_s = "/".join(rel_parts)
+    new_kit = "${CLAUDE_PROJECT_DIR}/" + (rel_s + "/" if rel_s else "") + ".ai-review/kit/kit.py"
+    out_text = text.replace(HOOK_KIT_PY, new_kit)
+    pyc = getattr(args, "python", None)
+    if pyc and pyc != "py":
+        # 沒有 py 啟動器的電腦（macOS／Linux 等）：守門 hook 的 command 換成這個直譯器、args 拿掉 "-3"（RV-1／RV-8）
+        if not re.match(r"^[A-Za-z0-9._/:\\-]{1,260}$", pyc):
+            print("--python 只收不含空白與引號的指令名或路徑（例如 python3）。", file=sys.stderr)
+            return 2
+        t2, n = re.subn(r"^(\s*command:\s*)py[ \t]*$", lambda m: m.group(1) + pyc, out_text, count=1, flags=re.M)
+        t2 = t2.replace('args: ["-3", ', "args: [", 1) if n else t2
+        if not n or t2 == out_text:
+            print(f"{src} 裡找不到 `command: py`，無法換直譯器（檔案被改過？用 update --take-source {AGENT_DST_REL} 還原）。",
+                  file=sys.stderr)
+            return 1
+        out_text = t2
+    if not getattr(args, "out", None):
+        sys.stdout.flush()
+        sys.stdout.buffer.write(out_text.encode("utf-8"))   # 原樣輸出（不做平台換行轉換），導向成檔也與 --out 相同
+        sys.stdout.buffer.flush()
+        return 0
+    op = Path(args.out)
+    if op.exists() and not args.force:
+        print(f"{op} 已存在，不覆寫；確定要覆寫加 --force。", file=sys.stderr)
+        return 1
+    write_text(op, out_text)
+    print(f"已寫入：{op}（hook 路徑 {new_kit}）")
+    print(f"要讓對話根 {root} 開的 Claude Code 找得到，這個檔要放在 {root / '.claude' / 'agents'} 底下；第一次放要重開 Claude Code。")
+    print("同一個對話根只能放一份 independent-reviewer（同名時離對話資料夾最近的那份生效）。")
     return 0
 
 
@@ -1778,6 +2611,7 @@ def do_status(args):
         info[f"block_{name}"] = bool(fp.exists() and extract_block(norm_nl(read_text(fp))))
     info["skills"] = {n: (target / ".claude" / "skills" / n / "SKILL.md").exists() for n in ("safety-setup", "review-ready", "review-fix")}
     info["codex_skill"] = (target / ".agents" / "skills" / "independent-review" / "SKILL.md").exists()
+    info["claude_agent"] = (target / AGENT_DST_REL).exists()
     st = derive_and_write_state(target, quiet=True)
     info["state"] = st
     if getattr(args, "json", False):
@@ -1796,7 +2630,8 @@ def do_status(args):
     print(f"Claude hooks：SessionStart {'✓' if info['claude_hooks']['SessionStart'] else '✗'}、Stop {'✓' if info['claude_hooks']['Stop'] else '✗'}"
           f"；入口區塊 CLAUDE.md {'✓' if info['block_CLAUDE.md'] else '✗'}、AGENTS.md {'✓' if info['block_AGENTS.md'] else '✗'}")
     print(f"Skills：" + "、".join(f"{k} {'✓' if v else '✗'}" for k, v in info["skills"].items()) +
-          f"；Codex $independent-review {'✓' if info['codex_skill'] else '✗'}；Codex hook {'✓' if info['codex_hook'] else '✗'}")
+          f"；Codex $independent-review {'✓' if info['codex_skill'] else '✗'}；Codex hook {'✓' if info['codex_hook'] else '✗'}"
+          f"；審查員子代理 independent-reviewer {'✓' if info['claude_agent'] else '✗'}")
     print("---")
     print_state(st)
     return 0
@@ -1811,7 +2646,8 @@ def do_pack(args):
     out_dir = Path(getattr(args, "out", None) or (src / "dist"))
     out_dir.mkdir(parents=True, exist_ok=True)
     zp = out_dir / f"{KIT_NAME}-{ver}.zip"
-    include_top = ["README.md", "VERSION", "CHANGELOG.md", "core", "templates", "claude", "codex", "tools", "docs"]
+    include_top = ["README.md", "README.zh-TW.md", "LICENSE", "VERSION", "CHANGELOG.md", "core", "templates", "claude", "codex",
+                   "tools", "docs"]
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
         for top in include_top:
             p = src / top
@@ -2087,6 +2923,61 @@ def find_tool(name, target):
     return None
 
 
+def claude_agent_state(target):
+    """審查員子代理定義：檔在、含 omitClaudeMd: true（不讀 CLAUDE.md）、含 review-guard（守門 hook）。只讀。"""
+    p = Path(target) / AGENT_DST_REL
+    if not p.is_file():
+        return False, (f"沒有 {AGENT_DST_REL}：跑 kit.py update 補裝（第一次裝要重開 Claude Code）；"
+                       "沒有它就只能走 Codex 審查")
+    try:
+        t = norm_nl(read_text(p))
+    except Exception as e:
+        return False, f"讀不到 {AGENT_DST_REL}（{str(e)[:120]}）"
+    miss = [k for k, ok in (("omitClaudeMd: true", re.search(r"^omitClaudeMd:\s*true\s*$", t, re.M)),
+                            ("review-guard", "review-guard" in t)) if not ok]
+    if miss:
+        return False, (f"{AGENT_DST_REL} 缺 {'、'.join(miss)}（被改過？）：用 kit.py update --take-source {AGENT_DST_REL} 還原成套件版")
+    notes = [f"{AGENT_DST_REL}：不讀 CLAUDE.md、有守門 hook"]
+    ok = True
+    # 守門 hook 的直譯器起不來時 Claude Code 照樣執行工具（RV-1）：command 是 py 就確認找得到 py
+    m = re.search(r"^\s*command:\s*[\"']?([^\s\"']+)", t, re.M)
+    cmd = m.group(1) if m else None
+    if cmd == "py":
+        if shutil.which("py"):
+            notes.append("守門 hook 的 py 找得到")
+        else:
+            ok = False
+            notes.append("守門 hook 寫的是 py，但這台電腦找不到 py → 守門起不來、審查員不受限：改用 "
+                         "kit.py reviewer-agent --session-root <專案> --python python3 --out <專案>/.claude/agents/independent-reviewer.md "
+                         "--force 產生改好的定義，或手動把 command 改成 python3、args 拿掉 \"-3\"")
+    elif cmd and not (Path(cmd).is_file() or shutil.which(cmd)):
+        ok = False
+        notes.append(f"守門 hook 的直譯器 {cmd} 找不到 → 守門起不來、審查員不受限")
+    ver, vnote = claude_cli_version()
+    if ver is None:
+        notes.append(f"Claude Code 版本：未知（{vnote}；需 {'.'.join(map(str, CLAUDE_MIN_VERSION))} 以上，請自己確認）")
+    elif ver < CLAUDE_MIN_VERSION:
+        ok = False
+        notes.append(f"Claude Code {'.'.join(map(str, ver))} 太舊：需 {'.'.join(map(str, CLAUDE_MIN_VERSION))} 以上"
+                     "（舊版默默忽略 omitClaudeMd，審查員會讀 CLAUDE.md）")
+    else:
+        notes.append(f"Claude Code {'.'.join(map(str, ver))}")
+    notes.append("守門要生效：專案資料夾要在 Claude Code 開過並接受信任、Claude Code 開在專案根目錄（kit 查不到，請自己確認）")
+    return ok, "；".join(notes)
+
+
+def claude_cli_version(timeout=20):
+    """`claude --version` 的版本（tuple）；找不到或讀不懂 → (None, 原因)。只執行這一條，不讀 ~/.claude.json。"""
+    c = shutil.which("claude")
+    if not c:
+        return None, "找不到 claude 指令"
+    rc, out, err = run([c, "--version"], timeout=timeout)
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", out or "")
+    if rc != 0 or not m:
+        return None, "claude --version 讀不到版本"
+    return tuple(int(x) for x in m.groups()), ""
+
+
 def doctor(target, codex_name=None):
     target = Path(target)
     items = []
@@ -2125,6 +3016,11 @@ def doctor(target, codex_name=None):
     add("python", "送審用的 Python", not alias,
         f"{py}" + ("（⚠️ 這是應用程式別名，Codex 沙箱可能啟動不了；改用實體安裝的 Python 執行 kit.py）" if alias else ""))
     proj = None
+    if (target / ".ai-review").is_dir():
+        ok, msg = claude_agent_state(target)
+        add("claude_agent", "審查員子代理（independent-reviewer）", ok, msg)
+    else:
+        add("claude_agent", "審查員子代理（independent-reviewer）", None, "專案還沒安裝 ai-review-kit，略過")
     if (target / ".ai-review").is_dir():
         init, reason = config_initialized(target)
         proj = {"installed": manifest_path(target).exists(), "kit_version": kit_version_of(target),
@@ -2218,6 +3114,8 @@ def build_parser():
     s.add_argument("--no-write", action="store_true", help="只推導、不寫 state.json 與任何檔（配 --json 給外部程式讀）")
     s = sub.add_parser("verify", help="核對目前指紋與交接目標"); common(s); s.add_argument("--handoff")
     s = sub.add_parser("gate", help="合併／部署前關卡"); common(s)
+    s.add_argument("--require-reviewer", choices=["codex"],
+                   help="另外要求最新有效審查的審查者是這個（發版前：codex；隔離 Claude 審查不算）")
     s = sub.add_parser("new-id", help="產生報告編號"); common(s); s.add_argument("prefix", choices=["H", "R", "F"])
     s = sub.add_parser("codex-review", help="啟動 Codex 獨立審查最新交接（紀錄寫 .ai-review/.cache/）"); common(s)
     s.add_argument("--handoff", help="交接編號（預設最新；只接受最新那份）")
@@ -2231,12 +3129,29 @@ def build_parser():
                    help="用這個 Codex 權限設定檔送審（-c default_permissions，不帶 -s）；"
                         "預設：Codex 設定檔有 default_permissions 就用它，沒有就 -s workspace-write")
     s.add_argument("--codex", help="codex 執行檔（預設 PATH 上的 codex）")
-    s = sub.add_parser("hook", help="hook 進入點"); common(s); s.add_argument("event", choices=["session-start", "stop"]); s.add_argument("--agent", default="claude")
+    s = sub.add_parser("claude-review", help="隔離 Claude 子代理審查的開始（--begin）與收尾（--end）（紀錄寫 .ai-review/.cache/）")
+    common(s)
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--begin", metavar="H-id", help="核對交接、寫開始紀錄與審前清單，印派審查員的資訊")
+    g.add_argument("--end", metavar="H-id", help="審查員回報後：找 R 報告、審後比對、寫 .done、推導狀態")
+    s.add_argument("--model", metavar="別名", help="--end 必填：派審查員時用的模型別名（例如 fable、opus）")
+    s.add_argument("--again", action="store_true", help="已有審查或開始紀錄還沒逾時，仍要重來")
+    s.add_argument("--print", action="store_true", dest="print_only", help="只印會做什麼，不寫任何檔")
+    s.add_argument("--timeout", type=int, default=60, help="開始紀錄幾分鐘後算逾時（預設 60）")
+    s = sub.add_parser("reviewer-agent", help="印出（或 --out 寫出）改好 hook 路徑（與直譯器）的審查員子代理定義，"
+                                              "給巢狀專案放在對話根、或沒有 py 的電腦用")
+    common(s)
+    s.add_argument("--session-root", required=True, metavar="資料夾", help="Claude Code 對話開始的資料夾（專案要在它底下）")
+    s.add_argument("--out", metavar="檔案", help="寫到這個檔（預設印到畫面）")
+    s.add_argument("--force", action="store_true", help="--out 的檔已存在時覆寫")
+    s.add_argument("--python", metavar="直譯器", help="守門 hook 改用這個直譯器（沒有 py 的電腦填 python3；預設 py -3）")
+    s = sub.add_parser("hook", help="hook 進入點"); common(s)
+    s.add_argument("event", choices=["session-start", "stop", "review-guard"]); s.add_argument("--agent", default="claude")
     s = sub.add_parser("pack", help="打離線 zip"); s.add_argument("--out"); s.add_argument("--source")
     s = sub.add_parser("check-update", help="檢查線上版本（選用，不自動更新）"); common(s); s.add_argument("--url")
     s = sub.add_parser("ignore-check", help="唯讀檢查 .gitignore 有沒有排除金鑰、憑證、AI 逐字稿與記憶（只提醒，不改檔）")
     common(s); s.add_argument("--json", action="store_true")
-    s = sub.add_parser("doctor", help="唯讀列出送審前還缺什麼（Codex、登入、node_repl、gitleaks、pip-audit、Python）")
+    s = sub.add_parser("doctor", help="唯讀列出送審前還缺什麼（Codex、登入、node_repl、gitleaks、pip-audit、Python、審查員子代理）")
     common(s); s.add_argument("--json", action="store_true"); s.add_argument("--codex", help="codex 執行檔（預設 PATH 上的 codex）")
     s = sub.add_parser("version", help="印出版本")
     return p
@@ -2277,6 +3192,10 @@ def main(argv=None):
         return do_new_id(args)
     if args.cmd == "codex-review":
         return do_codex_review(args)
+    if args.cmd == "claude-review":
+        return do_claude_review(args)
+    if args.cmd == "reviewer-agent":
+        return do_reviewer_agent(args)
     if args.cmd == "hook":
         return do_hook(args)
     if args.cmd == "pack":

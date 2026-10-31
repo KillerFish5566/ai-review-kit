@@ -23,8 +23,11 @@
 4. **重大變更的設計檢查**：如果這次動到登入、權限、敏感資料、對外介面，先照 `security-checklist.md` 第 2 節做設計層檢查，把結論寫進第 6 節。
 5. **寫交接報告**：複製 `templates/handoff.md` 到 `.ai-review/handoffs/<id>.md`，填滿每一節。
 6. **推導狀態**：`py -3 .ai-review/kit/kit.py state`，確認顯示「待獨立審查」（或「待複查」）。
-7. **告訴使用者**（三到五句白話）：改了什麼、檢查結果、有什麼風險、下一步是 Codex 審查。
-8. **啟動審查**：`py -3 .ai-review/kit/kit.py codex-review` 在背景跑（Claude Code 用背景執行；其他環境加 `--detach`）。找不到 codex（exit 3）或使用者要自己開時，退回手動：`docs/codex-start.md`。
+7. **告訴使用者**（三到五句白話）：改了什麼、檢查結果、有什麼風險、下一步是獨立審查員審查（隔離 Claude 或 Codex，見第 8 步）。
+8. **選審查員並啟動審查**（細節照 `/review-ready` 第 10～12 步）：
+   - **選路線**：snapshot 的 `modified`＋`untracked`，與 `git diff --stat <base>..<snapshot_ref>` 的檔數，取較大者；大於 `config.md` 第 5 節 `big_change_files`（沒填當 10）→ Codex；否則隔離 Claude。使用者指定 `--codex`／`--claude` 時照指定。
+   - **隔離 Claude 路線**（預設）：`kit.py claude-review --begin <id>` → 派 `independent-reviewer` 子代理（模型與開發 AI 不同）→ `kit.py claude-review --end <id> --model <別名>`。報告標「非 Codex 審查」。
+   - **Codex 路線**（大件、發版前）：`py -3 .ai-review/kit/kit.py codex-review` 在背景跑（Claude Code 用背景執行；其他環境加 `--detach`）。找不到 codex（exit 3）或使用者要自己開時，退回手動：`docs/codex-start.md`。
 
 ## 3. 報告必填內容
 

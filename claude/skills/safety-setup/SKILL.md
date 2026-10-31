@@ -45,6 +45,8 @@ secrets | gitleaks detect --no-banner --redact | no
 
 - 公開服務或處理別人資料：medium 也阻擋。只有自己用的本機工具：只擋 critical／high。
 - 寫明目前有沒有遠端保護規則（branch protection、必經 CI）。沒有就寫「無；本地關卡可被略過」。
+- `big_change_files`：大件門檻，一次交接改動檔數超過它，`/review-ready` 改送 Codex 審查；預設 10，使用者沒說就填 10。`--refresh` 時舊 config 沒有這一行就照範本補上。
+- 「發版前 gate 需 Codex 審查：是／否」：是＝發版前跑 `kit.py gate --require-reviewer codex`，最新有效審查不是 Codex 審的就不放行。對外散布或公開服務建議「是」；問使用者決定，沒答前填「否」並在第 6 節記一列等他決定。`--refresh` 時舊 config 沒有這一行就照範本補上。
 
 ### 5. 未驗證事項（第 6 節）
 

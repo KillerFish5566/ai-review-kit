@@ -4,7 +4,9 @@ id: {{ID}}
 created: {{DATE}}
 handoff: {{HANDOFF_ID}}
 target: {{TARGET}}
-reviewer: codex
+reviewer: <codex | claude-isolated>
+reviewer_model: <claude-isolated 才填：派工時的模型別名，例如 fable、opus；codex 刪掉這行>
+reviewer_isolation: <claude-isolated 才填：subagent;omitClaudeMd;no-memory;review-guard；codex 刪掉這行>
 verdict: needs-fix | no-blocking-found | invalid
 blocking: 0
 kit_version: {{KIT_VERSION}}

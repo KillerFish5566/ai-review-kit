@@ -22,7 +22,7 @@
    - 寫 `.ai-review/fixes/F-xxx.md`（`review` 欄填 R-xxx）。
    - 重新照 `handoff-spec.md` 交接：`snapshot` → `checks --run` → 新的 `H-yyy.md`，檔頭 `recheck_of: R-xxx`。修正報告的 `handoff` 欄填 H-yyy。
    - `kit.py state` 應顯示「待複查」。
-7. 告訴使用者：處理了幾項、幾項修了、幾項不成立（理由一句）、幾項要他決定，下一步是再讓 Codex 審一次。
+7. 告訴使用者：處理了幾項、幾項修了、幾項不成立（理由一句）、幾項要他決定，下一步是再讓獨立審查員審一次（`/review-ready --recheck` 會依變更大小選隔離 Claude 或 Codex）。
 
 ## 2. 不可以
 

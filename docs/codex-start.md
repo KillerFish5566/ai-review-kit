@@ -1,10 +1,12 @@
 # 讓 Codex 接手獨立審查（手動啟動＝退路）
 
-平常不用看這份：`/review-ready` 最後會用 `py -3 .ai-review/kit/kit.py codex-review` 在背景啟動 Codex。找不到 codex、或你想自己看 Codex 怎麼審時，才照下面手動做。
+Codex 現在是**大件與發版前**的審查路線：平常的變更預設由隔離的 Claude 審查員子代理審（報告標「非 Codex 審查」）；改動檔數超過 `config.md` 第 5 節 `big_change_files`（沒填當 10）、或你要發版前帶 `/review-ready --codex` 時，`/review-ready` 才會用 `py -3 .ai-review/kit/kit.py codex-review` 在背景啟動 Codex。
+
+平常不用看這份。Codex 路線找不到 codex、或你想自己看 Codex 怎麼審時，才照下面手動做。
 
 ## 只在專案資料夾開 Codex
 
-**一律在專案根目錄開 Codex**（手動開或用 `codex exec -C <專案>` 都一樣）。不要在使用者資料夾（`C:\Users\<你>`）、也不要在放很多專案的上層資料夾開。
+**一律在專案根目錄開 Codex**（手動開或用 `codex exec -C <專案>` 都一樣）。不要在使用者資料夾（`%USERPROFILE%`、`~`）、也不要在放很多專案的上層資料夾開。
 
 為什麼（2026-10-11 在 Windows 實際查到的現象）：
 - 在某個資料夾開過 Codex，Windows 版 Codex 沙箱的群組（`CodexSandboxUsers`）就可能對那個資料夾和底下全部子資料夾多一筆「可修改」權限，Codex 關掉後還留著。在使用者資料夾開過一次，等於沙箱能改 Claude Code 的設定夾（`.claude`：規則、hook、記憶、對話紀錄）和其他專案。
@@ -35,6 +37,6 @@ codex
 審查完成後回到 Claude Code：
 
 - 結論是 `needs-fix` → `/review-fix R-編號`
-- 結論是 `no-blocking-found` → 合併前 `py -3 .ai-review/kit/kit.py gate`
+- 結論是 `no-blocking-found` → 合併前 `py -3 .ai-review/kit/kit.py gate`（發版前要求 Codex 審查的專案用 `gate --require-reviewer codex`）
 
 不想讓 Codex 動任何檔案時，用唯讀沙箱啟動：`codex --sandbox read-only`；報告內容會印在畫面上，請自己存到 `.ai-review/reviews/<R-編號>.md`。
