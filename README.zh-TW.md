@@ -48,7 +48,7 @@ ai-review-kit/
 ├ claude/agents/   independent-reviewer（隔離 Claude 審查員子代理，裝到專案 .claude/agents/）
 ├ codex/skills/    independent-review（Codex Skill，裝到專案 .agents/skills/）
 ├ tools/kit.py     安裝／更新／狀態／還原／打包 ＋ 專案內的快照／檢查／狀態／關卡／hook
-├ tools/tests/     自動化驗證（暫存專案，383 個檢查點）
+├ tools/tests/     自動化驗證（暫存專案，440 個檢查點）
 └ docs/            codex-start.md（讓 Codex 接手）、daily-usage.md（日常）、offline-setup.md（帶到不能連 GitHub 的電腦）
 ```
 
