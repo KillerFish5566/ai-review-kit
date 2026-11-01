@@ -6,7 +6,7 @@ handoff: {{HANDOFF_ID}}
 target: {{TARGET}}
 reviewer: <codex | claude-isolated>
 reviewer_model: <claude-isolated 才填：派工時的模型別名，例如 fable、opus；codex 刪掉這行>
-reviewer_isolation: <claude-isolated 才填：subagent;omitClaudeMd;no-memory;review-guard；codex 刪掉這行>
+reviewer_isolation: <claude-isolated 才填：subagent;omitClaudeMd;no-memory;review-guard（omitClaudeMd 只略過開場載入的 CLAUDE.md；讀子資料夾的檔時有 CLAUDE.md／AGENTS.md 被附進對話就改寫 omitClaudeMd:startup-only，並在第 1 節限制寫明檔名）；codex 刪掉這行>
 verdict: needs-fix | no-blocking-found | invalid
 blocking: 0
 kit_version: {{KIT_VERSION}}

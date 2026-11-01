@@ -119,7 +119,11 @@ Codex 路線（大件、發版前）：
 
 ```
 py -3 .ai-review/kit/kit.py status        看版本、初始化、狀態、指紋是否相符
-py -3 .ai-review/kit/kit.py gate          合併／部署前的關卡（只有 no-blocking-found 且指紋相符才 exit 0）
+py -3 .ai-review/kit/kit.py gate          合併／部署前的關卡（只有 no-blocking-found 且指紋相符才 exit 0）；
+                                          另外用本機紀錄核對（不限 --require-reviewer）：最新有效審查是隔離 Claude、
+                                          而收尾紀錄（.cache/claude-<H>.done）記守門心跳 0 筆 → 不成立（加 --allow-no-guard
+                                          才放行並印提醒）；本機沒有 .done（換電腦、CI）→ 不擋，印「守門有沒有生效無法核對」；
+                                          報告出現在隔離 Claude 審查員的守門寫檔紀錄、檔頭卻不是 claude-isolated＝冒充，一律擋
 py -3 .ai-review/kit/kit.py gate --require-reviewer codex
                                           發版前關卡：另外要求最新有效審查是 Codex 審的（隔離 Claude 審的 exit 1），
                                           並用本機紀錄核對檔頭：有 codex-review 的執行紀錄（.cache/codex-<H>.done）
@@ -128,19 +132,25 @@ py -3 .ai-review/kit/kit.py gate --require-reviewer codex
                                           否則依檔頭採信並印提示（守門沒生效時分辨不出）。
                                           .cache 不進版控，所以這是本機關卡（CI 不要帶這個參數）
 py -3 .ai-review/kit/kit.py snapshot      建交接快照（通常由 /review-ready 呼叫）
-py -3 .ai-review/kit/kit.py checks --run  執行 config.md 的檢查命令並記錄
+py -3 .ai-review/kit/kit.py checks --run  執行 config.md 的檢查命令並記錄（子程序的 PYTHONIOENCODING 沒設才補 utf-8、
+                                          已設照原值，補了會印一行；Windows 主控台是 cp1252／cp950 時，Python 寫的
+                                          檢查印 ✓ 或 emoji 才不會崩。審查員直接跑 config 第 4 節的命令（不經 kit）時
+                                          不受這條保護）
 py -3 .ai-review/kit/kit.py verify        核對目前指紋與最新交接
 py -3 .ai-review/kit/kit.py state         重新推導 state.json（加 --json --no-write：只印、不寫任何檔）
-py -3 .ai-review/kit/kit.py doctor        送審前還缺什麼（審查員定義、Codex、登入、gitleaks…；唯讀）
+py -3 .ai-review/kit/kit.py doctor        送審前還缺什麼（審查員定義、倉庫外定義是否同步、Codex、登入、gitleaks…；唯讀）
 py -3 .ai-review/kit/kit.py ignore-check  .gitignore 有沒有排除機密與 AI 逐字稿（唯讀）
 py -3 .ai-review/kit/kit.py codex-review  啟動 Codex 審查最新交接（等跑完；--detach 丟背景、--print 只看命令）
 py -3 .ai-review/kit/kit.py claude-review --begin <H-id> [--again]
                                           隔離 Claude 審查開審：檢查能不能審、寫 .cache/claude-<H>.running（審前工作區清單、
-                                          審前報告清單）、清空守門心跳 .cache/claude-<H>.guard.jsonl、印派工的四行 prompt
+                                          審前報告清單）、清空守門心跳 .cache/claude-<H>.guard.jsonl、印派工的四行 prompt；
+                                          倉庫外定義不同步時印 ⚠️（不擋）並在 .running／.done 記 agent_stale: true
 py -3 .ai-review/kit/kit.py claude-review --end <H-id> --model <別名>
                                           收尾：只收這次新寫的 reviewer: claude-isolated 報告（沒有 → exit 1）；審查開始前就有的
                                           報告被改／刪、或新報告 reviewer 不對 → 警告並 exit 1；守門心跳 0 筆 → 顯眼警告、
-                                          狀態標「守門未生效」；審後比對、寫 .cache/claude-<H>.done（含 guard_calls）、推導狀態
+                                          狀態標「守門未生效」；審後比對、寫 .cache/claude-<H>.done（含 guard_calls）、推導狀態；
+                                          可能被附進審查員對話的 CLAUDE.md 清單非空 → .done 加 nested、claude_md_exposure，
+                                          isolation 的 omitClaudeMd 改標 omitClaudeMd:startup-only，畫面印一行提醒
                                           （兩者加 --print：只印會做什麼，不寫檔）
 py -3 .ai-review/kit/kit.py reviewer-agent --session-root <對話資料夾> [--python python3] [--out <檔>]
                                           巢狀專案用：印出改好 hook 路徑的審查員定義（--out 才寫檔）；
@@ -154,15 +164,17 @@ macOS／Linux 把 `py -3` 換成 `python3`。
 **守門 hook（review-guard）**：裝在 `independent-reviewer` 子代理定義的 `hooks.PreToolUse`（加 `onFailure: block`），只對審查員生效，擋下時 exit 2 並印白話原因。
 - **生效前提**（kit 查不到的部分要自己確認，`kit.py doctor` 會提醒）：
   - 專案資料夾要在 Claude Code 開過一次並**接受信任**：沒信任時 Claude Code 會略過子代理定義裡的 hooks、不報錯，審查員完全不受限（2026-11-01 實測）。
-  - Claude Code **2.1.271 以上**（`omitClaudeMd` 要這版；舊版默默忽略，審查員會讀 CLAUDE.md）。
+  - Claude Code **2.1.271 以上**（`omitClaudeMd` 要這版；舊版默默忽略，審查員會讀 CLAUDE.md）。`omitClaudeMd` 只略過開場載入的 CLAUDE.md：審查員讀到子資料夾（巢狀時含專案本身）的檔時，那層的 CLAUDE.md 仍會附進審查員對話（Claude Code 官方文件寫明的行為），kit 會在 `.done` 記下（`claude_md_exposure`），審查員定義也規定只當資料、寫進報告限制。
   - 找得到 hook 寫的直譯器（預設 `py`）：找不到時 hook 起不來、工具照跑。沒有 `py` 的電腦用 `reviewer-agent --python python3` 產生改好的定義，或手動把 `command` 改成 `python3`、`args` 拿掉 `"-3"`。
   - Claude Code **開在專案根目錄**（或 `reviewer-agent --session-root` 指定的上層資料夾）：開在專案的子資料夾時 hook 路徑找不到 kit.py，審查員的工具全被擋（安全但不能用）。
-- **確認有生效**：審查員第 0 步先跑 `echo guard-canary`，應被擋；沒被擋就不審、回報「守門未生效，停止審查」。守門每次被呼叫都在 `.ai-review/.cache/claude-<H>.guard.jsonl` 記一行（時間、工具名、放行／擋下；放行的寫檔另記 R 檔名；不記指令與檔案內容）；`claude-review --end` 看到 0 筆就顯眼警告，`.done` 的 `isolation` 寫 `subagent;omitClaudeMd;no-memory;guard-not-observed`，狀態標「（非 Codex 審查；守門未生效）」。
+- **確認有生效**：審查員第 0 步先跑 `echo guard-canary`，應被擋；沒被擋就不審、回報「守門未生效，停止審查」。守門每次被呼叫都在 `.ai-review/.cache/claude-<H>.guard.jsonl` 記一行（時間、工具名、放行／擋下、`nested`（hook 環境變數 `CLAUDE_PROJECT_DIR` 有值且不是專案根＝true，只記布林）；放行的寫檔另記 R 檔名；不記指令、檔案內容與路徑）；`claude-review --end` 看到 0 筆就顯眼警告，`.done` 的 `isolation` 寫 `subagent;omitClaudeMd;no-memory;guard-not-observed`，狀態標「（非 Codex 審查；守門未生效）」。
 - 寫檔（Edit／Write）只准 `.ai-review/reviews/R-*.md`，而且要先有開審紀錄（`claude-review --begin` 寫的 `.running`；沒有就擋所有寫入）：Write 只能建還不存在的檔，Edit 只能改審查開始後新寫的報告（審查開始前就有的報告不准改）。
 - 指令（Bash）只准：`git [-C <專案>] diff|show|log|status|ls-files|rev-parse|cat-file …`；`py -3`（Windows）或 `python3` 執行本專案 `.ai-review/kit/kit.py` 的 `verify`、`new-id R`（只准 R）、`state --no-write`（只有 state 可帶 `--json`）、`checks --run`（都可加 `--target <專案>`）；`config.md` 第 4 節登記的檢查命令**逐字相同**（多一個參數就擋）。不准 `&&`、`;`、`|`、`>`、`<`、反引號、`$(`、換行等串接與轉向。路徑一律用雙引號或正斜線（反斜線沒加引號會被 bash 吃掉）。
 - 子代理交最後回報的工具（`SubagentHandback`）放行；其他白名單外的工具一律擋。
 - 審查員跑 `checks --run` 不帶 `--handoff`（帶了會蓋掉開發端交接時的檢查紀錄，守門也會擋）。
 - **限制**：守門只管 Claude 的工具層。白名單內的程式（例如檢查命令啟動的 Python 子程序）自己開檔寫檔它看不到，這部分靠 `claude-review --end` 的審前審後比對抓出來（印警告、寫進 `.done`，不自動刪）。git 的設定（例如 `core.fsmonitor`、`gpg.program`）也可能讓唯讀的 git 指令叫外部程式；審查員改不到 git 設定（`-c`、環境變數、設定檔都擋），會執行簽章程式的 `--show-signature` 也擋。
 - **巢狀專案**：子代理定義只從「對話開啟的資料夾」往上找 `.claude/agents/`，hook 路徑裡的 `${CLAUDE_PROJECT_DIR}` 也是對話資料夾。對話開在專案的上層資料夾時，專案內的審查員定義不會被載入；用 `reviewer-agent --session-root <對話資料夾>` 產生改好路徑的定義，放到對話資料夾的 `.claude/agents/`（同一個對話資料夾只能放一份 `independent-reviewer`）。新放的定義要重開 Claude Code 才載入。
+  - 巢狀時 `omitClaudeMd` 略過的是對話資料夾的 CLAUDE.md；審查員一讀專案裡的檔，**專案本身的 CLAUDE.md**（與子資料夾的）就會被附進對話。`claude-review --end` 會算「可能被附進來的 CLAUDE.md」（巢狀時專案根那份＋子資料夾裡的；不含 `.ai-review/`、`.git/` 與指紋略過的資料夾），記在 `.done` 的 `claude_md_exposure`，`isolation` 標 `omitClaudeMd:startup-only`。
+  - 放在對話資料夾的那份定義不在倉庫、不受指紋綁定、`kit update` 不會更新它。`doctor`、`kit update`、`claude-review --begin` 會從專案的上層一路往上找 `<上層>/.claude/agents/independent-reviewer.md`，用專案內版本重算應有內容比對：不同步時 `doctor` 列 ✗、`update` 與 `--begin` 印 ⚠️（`--begin` 另在 `.running`／`.done` 記 `agent_stale: true`），都附修法指令 `kit.py reviewer-agent --target <專案> --session-root <上層> --out <那份檔> --force`，跑完重開 Claude Code。kit 不自己寫專案外的檔（那可能是使用者的設定資料夾）。
 
 `codex-review` 的固定做法：`codex exec -C <專案> <沙箱權限> "$independent-review <H-id>"`；沙箱權限：使用者的 Codex 設定檔（`CODEX_HOME` 或 `~/.codex/config.toml`）最上層有 `default_permissions`（權限設定檔，可設禁止讀取清單）→ 帶 `-c default_permissions="<名稱>"`、**不帶 `-s`**（帶了 `-s` Codex 就改走舊式設定、權限設定檔整組不生效）；沒有 → `-s workspace-write`；`--permissions <名稱>` 可指定，名稱含 danger 一律拒絕；用了哪一種印在畫面並寫進 `.done` 的 `permissions`；TMP／TEMP 指 `.ai-review/.cache/tmp`（Codex 沙箱不准寫系統暫存）；環境變數 `AI_REVIEW_PYTHON` 給沙箱用的實體直譯器（Windows 的 `py` 是應用程式別名，沙箱啟動不了）；這個變數與 `SystemDrive`、`SystemRoot` 等用 `-c` 帶進沙箱：shell 工具走官方的 `shell_environment_policy.set`，Codex 改用 node_repl 工具時走 `mcp_servers.node_repl.env` 並加進它的放行名單（只對這次審查有效，不改 Codex 設定檔；少了 `SystemDrive` 時 Windows 元件會在專案根目錄建字面名稱的 `%SystemDrive%\` 資料夾，打壞指紋）；不加 `-m`（模型照 Codex 設定檔）、永遠不用 `--dangerously-bypass-approvals-and-sandbox`；紀錄寫 `.ai-review/.cache/codex-<H-id>.log`，結束寫 `.done`（exit、審查編號、結論）；審前審後比對工作區（與指紋同一套收檔規則），審查期間多出、改掉或刪掉的檔會印警告並寫進 `.done`（`workspace_changes`、`fingerprint_drift`）與紀錄；另外比對專案根目錄與第一層資料夾的清單（**包括 .gitignore 排除的**，`.ai-review/.cache/` 除外），多出來的寫進 `new_ignored_entries` 並警告（不算指紋）；**不自動刪**——先看是什麼再決定。指紋計算的新物件寫在暫存物件庫，所以 Codex 不需要 `.git` 的寫入權。

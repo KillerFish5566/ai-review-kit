@@ -135,6 +135,7 @@ Claude Code 只從「對話開啟的資料夾」往上找 `.claude/agents/`，ho
 - hook 只做機械判斷（版本、指紋是否相符、有沒有未結案、審查員的白名單）。它不掃描程式碼、不呼叫另一個 AI、不能擋住 push 或部署。
 - 隔離 Claude 審查員換了模型、不帶開發脈絡，但終究還是 Claude，守門也只管 Claude 自己的工具層（見「兩種審查員」）。報告與狀態標「非 Codex 審查」讓你分得出來；大件與發版前用 Codex。
 - 審查員子代理定義是 Claude Code 開啟時載入：第一次安裝、或更新後才多出這個檔，要重開 Claude Code。巢狀專案不用 `reviewer-agent` 就完全找不到它。
+- `omitClaudeMd` 只略過開場載入的 CLAUDE.md：審查員讀到子資料夾（巢狀時含專案本身）的檔時，那層的 CLAUDE.md 仍會附進審查員對話；kit 會在 `.done` 記下是哪幾份（`claude_md_exposure`）。
 - 開場狀態與收工提醒（hook）只有在**專案資料夾直接開 Claude Code** 才會跑（hook 寫在專案自己的 `.claude/settings.json`）；從上層資料夾開的對話不會自動提醒，要自己跑 `kit.py state` 或 `/review-ready`。
 - 審查紀錄（`.ai-review/handoffs`、`reviews`、`fixes`）跟著 git 分支走：換分支後看到的是那個分支的狀態，不是審查不見了。
 - `gate` 是本地檢查，可以被略過。要強制，得在 GitHub 設 branch protection 並讓 CI 跑 gate（`templates/ci/github-actions-gate.yml` 是範例，尚未在真實 repo 驗證）。

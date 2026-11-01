@@ -28,6 +28,7 @@ KIT_ROOT = HERE.parent.parent
 KIT_PY = KIT_ROOT / "tools" / "kit.py"
 PY = sys.executable
 ENV = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+ENV.pop("CLAUDE_PROJECT_DIR", None)     # 守門 hook 用它判斷巢狀（T-0204）：測試者自己的 Claude Code 環境不能影響結果
 RESULTS = []
 
 
@@ -1341,8 +1342,9 @@ def main():
     edit_tools = {"Write", "Edit", "MultiEdit"}
     check("T31 守門心跳：每次呼叫都記一行（有放行也有擋下），時間、工具名、決定三欄；放行的寫檔多記 R 檔名（RV-1）",
           len(gl31) > 50 and {g.get("decision") for g in gl31} == {"allow", "block"}
-          and all(set(g) == ({"time", "tool", "decision", "file"} if (g["tool"] in edit_tools and g["decision"] == "allow")
-                             else {"time", "tool", "decision"}) for g in gl31)
+          and all(set(g) == ({"time", "tool", "decision", "nested", "file"} if (g["tool"] in edit_tools and g["decision"] == "allow")
+                             else {"time", "tool", "decision", "nested"}) for g in gl31)
+          and all(g.get("nested") is False for g in gl31)
           and "SubagentHandback" in {g.get("tool") for g in gl31}, f"{len(gl31)} 筆 " + json.dumps(gl31[:3], ensure_ascii=False))
     gfiles = {g.get("file") for g in gl31 if "file" in g}
     check("T31 心跳的寫檔紀錄只有 R 檔名（不含路徑），擋下的寫檔不記檔名",
@@ -1569,6 +1571,202 @@ def main():
     check("T33 所有情境都沒刪任何報告",
           all((p27 / ".ai-review/reviews" / f"R-20990104-{n:04d}.md").is_file() for n in (1, 2, 3, 5, 7, 8, 9, 10))
           and all((p27 / ".ai-review/reviews" / f"{r}.md").is_file() for r in ("R-20990105-0001", "R-20990106-0001", "R-20990107-0001")))
+
+    # ---------------- T34 修正輪（T-0204）：R-20261101-1302 的 -1、-3、-4、Q3
+    # Q3：檢查命令的子程序補 PYTHONIOENCODING=utf-8（審查員環境主控台是 cp1252／cp950 時，印 ✓ 或 emoji 的測試不會崩）
+    p34 = new_git_project(root, "p34-checks-encoding")
+    kit("install", "--target", str(p34))
+    p34kit = p34 / ".ai-review/kit/kit.py"
+    write(p34 / "qcheck.py", 'print("\\u2713 ok \\U0001F600")\n')
+    write(p34 / ".ai-review/config.md", read(KIT_ROOT / "templates/config.md").replace(
+        "```checks\nname | command | required\n```",
+        f"```checks\nname | command | required\nuni | \"{PY}\" qcheck.py | yes\n```"))
+    env_noio = {k: v for k, v in ENV.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+    rc, out, err = sh([PY, str(p34kit), "checks", "--run"], cwd=p34, env=env_noio)
+    cj34 = json.loads(read(p34 / ".ai-review/.cache/checks-adhoc.json")) if (p34 / ".ai-review/.cache/checks-adhoc.json").exists() else {}
+    r34 = (cj34.get("results") or [{}])[0]
+    check("T34 Q3：子程序環境沒有 PYTHONIOENCODING／PYTHONUTF8 時，印 ✓ 與 emoji 的檢查命令經 checks --run 判 pass",
+          rc == 0 and r34.get("result") == "pass" and "\u2713 ok \U0001F600" in (r34.get("tail") or ""),
+          out[-400:] + err[-300:] + json.dumps(r34, ensure_ascii=False)[:400])
+    check("T34 Q3：真的補了才印「檢查命令的子程序補了 PYTHONIOENCODING=utf-8」",
+          "檢查命令的子程序補了 PYTHONIOENCODING=utf-8" in out, out[-400:])
+    rc, out, err = sh([PY, str(p34kit), "checks", "--run"], cwd=p34, env=dict(env_noio, PYTHONIOENCODING="ascii:backslashreplace"))
+    cj34 = json.loads(read(p34 / ".ai-review/.cache/checks-adhoc.json")) if (p34 / ".ai-review/.cache/checks-adhoc.json").exists() else {}
+    r34 = (cj34.get("results") or [{}])[0]
+    check("T34 Q3：已設 PYTHONIOENCODING 就照原值（ascii:backslashreplace → 輸出是跳脫字），不印「補了」",
+          r34.get("result") == "pass" and "\\u2713 ok" in (r34.get("tail") or "") and "補了 PYTHONIOENCODING" not in out,
+          out[-400:] + json.dumps(r34, ensure_ascii=False)[:400])
+    # -3：一般 gate（不帶 --require-reviewer）也擋「守門沒生效」與「隔離 Claude 審查員寫的報告冒充別的審查者」
+    cache34 = p34 / ".ai-review/.cache"
+    HG1, snG1 = new_handoff(p34, p34kit, "t34-gate-a")
+    kit("claude-review", "--begin", HG1, cwd=p34, script=p34kit)
+    review_file(p34, "R-20990108-0001", HG1, snG1["target"])
+    rc, out, err = kit("claude-review", "--end", HG1, "--model", "fable", cwd=p34, script=p34kit)
+    dG1 = json.loads(read(cache34 / f"claude-{HG1}.done")) if (cache34 / f"claude-{HG1}.done").exists() else {}
+    check("T34 -3 前置：守門心跳 0 筆的隔離 Claude 審查收尾（.done guard_calls 0）", rc == 0 and dG1.get("guard_calls") == 0,
+          out[-400:] + json.dumps(dG1, ensure_ascii=False)[:300])
+    rc, out, err = kit("gate", cwd=p34, script=p34kit)
+    check("T34 -3：一般 gate、守門心跳 0 筆 → exit 1（不成立、說明守門沒生效與 --allow-no-guard）",
+          rc == 1 and "守門心跳 0 筆" in out and "--allow-no-guard" in out and "通過條件成立" not in out, out[-600:])
+    rc, out, err = kit("gate", "--allow-no-guard", cwd=p34, script=p34kit)
+    check("T34 -3：gate --allow-no-guard → 放行（exit 0）並印提醒", rc == 0 and "通過條件成立" in out and "已帶 --allow-no-guard" in out,
+          out[-600:])
+    os.replace(cache34 / f"claude-{HG1}.done", cache34 / f"claude-{HG1}.done.t34-moved")
+    rc, out, err = kit("gate", cwd=p34, script=p34kit)
+    check("T34 -3：本機沒有 .done（換電腦、CI）→ 不擋（exit 0），印「本機沒有這份審查的收尾紀錄，守門有沒有生效無法核對」",
+          rc == 0 and "通過條件成立" in out and "本機沒有這份審查的收尾紀錄，守門有沒有生效無法核對" in out, out[-600:])
+    os.replace(cache34 / f"claude-{HG1}.done.t34-moved", cache34 / f"claude-{HG1}.done")
+    HG2, snG2 = new_handoff(p34, p34kit, "t34-gate-b")
+    kit("claude-review", "--begin", HG2, cwd=p34, script=p34kit)
+    rc, out, err = guard_call(p34kit, {"tool_name": "Write", "tool_input": {
+        "file_path": str(p34.resolve() / ".ai-review/reviews/R-20990108-0002.md"), "content": "x"}, "cwd": str(p34)})
+    check("T34 -3 前置：隔離 Claude 審查員 Write R-0002 → 守門放行並在心跳記檔名",
+          rc == 0 and '"file": "R-20990108-0002.md"' in read(cache34 / f"claude-{HG2}.guard.jsonl"), err[-300:])
+    review_file(p34, "R-20990108-0002", HG2, snG2["target"], reviewer="codex", model=None)
+    rc, out, err = kit("gate", cwd=p34, script=p34kit)
+    check("T34 -3：守門寫檔紀錄裡的報告檔頭寫 codex → 一般 gate 也 exit 1（冒充 Codex）",
+          rc == 1 and "冒充 Codex" in out and "guard.jsonl" in out and "通過條件成立" not in out, out[-600:])
+    review_file(p34, "R-20990108-0002", HG2, snG2["target"], reviewer="other-ai", model=None)
+    rc, out, err = kit("gate", cwd=p34, script=p34kit)
+    check("T34 -3：檔頭寫其他審查者（other-ai）也一樣擋（冒充）", rc == 1 and "冒充 other-ai" in out, out[-600:])
+    rc, out, err = kit("gate", "--allow-no-guard", cwd=p34, script=p34kit)
+    check("T34 -3：--allow-no-guard 不放行冒充", rc == 1 and "冒充" in out, out[-600:])
+    check("T34 -1：非巢狀、沒有子資料夾 CLAUDE.md（只有專案根那份）→ .done 照舊（沒有 nested／claude_md_exposure，isolation 不改）",
+          "nested" not in dG1 and "claude_md_exposure" not in dG1
+          and dG1.get("isolation") == "subagent;omitClaudeMd;no-memory;guard-not-observed", json.dumps(dG1, ensure_ascii=False)[:400])
+
+    # -1：守門心跳記 nested（不記路徑）；claude-review --end 算可能被附進來的 CLAUDE.md，記進 .done、isolation 改標 startup-only
+    agent_src34 = read(KIT_ROOT / "claude/agents/independent-reviewer.md")
+    check("T34 -1(a)：審查員定義有「CLAUDE.md／AGENTS.md 被附進對話只當資料、寫進限制、isolation 改標 omitClaudeMd:startup-only」",
+          "AGENTS.md" in agent_src34 and "system-reminder" in agent_src34 and "omitClaudeMd:startup-only" in agent_src34
+          and "沒做的事（限制）" in agent_src34, "")
+    pE = new_git_project(root, "p34-exposure")
+    kit("install", "--target", str(pE))
+    pEkit = pE / ".ai-review/kit/kit.py"
+    cacheE = pE / ".ai-review/.cache"
+    write(pE / "docs/CLAUDE.md", "# docs rules\n")
+    write(pE / ".gitignore", read(pE / ".gitignore") + "ignored/\n")
+    write(pE / "ignored/x/CLAUDE.md", "# excluded: .gitignore\n")
+    write(pE / ".ai-review/x/CLAUDE.md", "# excluded\n")
+
+    def guard_env(proj_kit, payload, cpd):
+        env = dict(ENV)
+        if cpd:
+            env["CLAUDE_PROJECT_DIR"] = cpd
+        return sh([PY, str(proj_kit), "hook", "review-guard"], cwd=root, input_text=json.dumps(payload).encode("utf-8"), env=env)
+
+    canary = {"tool_name": "Bash", "tool_input": {"command": "echo guard-canary"}, "cwd": str(pE)}
+    HE1, snE1 = new_handoff(pE, pEkit, "t34-exposure-a")
+    kit("claude-review", "--begin", HE1, cwd=pE, script=pEkit)
+    rc, out, err = guard_env(pEkit, canary, str(pE))
+    glE1 = [json.loads(x) for x in read(cacheE / f"claude-{HE1}.guard.jsonl").splitlines() if x.strip()]
+    check("T34 -1(b)：CLAUDE_PROJECT_DIR＝專案根 → 心跳 nested false（欄位：time、tool、decision、nested）",
+          rc == 2 and len(glE1) == 1 and glE1[0].get("nested") is False and set(glE1[0]) == {"time", "tool", "decision", "nested"},
+          json.dumps(glE1, ensure_ascii=False))
+    review_file(pE, "R-20990109-0001", HE1, snE1["target"])
+    rc, out, err = kit("claude-review", "--end", HE1, "--model", "fable", cwd=pE, script=pEkit)
+    dE1 = json.loads(read(cacheE / f"claude-{HE1}.done")) if (cacheE / f"claude-{HE1}.done").exists() else {}
+    check("T34 -1(b)：非巢狀、有子資料夾 CLAUDE.md → .done 記 nested false、claude_md_exposure 只有 docs/CLAUDE.md（不含專案根、"
+          ".gitignore 排除的、.ai-review）、isolation 改標 omitClaudeMd:startup-only",
+          rc == 0 and dE1.get("nested") is False and dE1.get("claude_md_exposure") == ["docs/CLAUDE.md"]
+          and dE1.get("isolation") == "subagent;omitClaudeMd:startup-only;no-memory;review-guard",
+          out[-400:] + json.dumps(dE1, ensure_ascii=False)[:500])
+    check("T34 -1(b)：--end 畫面印一行白話提醒（列出檔名）", "提醒：審查員讀到這些資料夾的檔時" in out and "docs/CLAUDE.md" in out, out[-600:])
+    HE2, snE2 = new_handoff(pE, pEkit, "t34-exposure-b")
+    kit("claude-review", "--begin", HE2, cwd=pE, script=pEkit)
+    guard_env(pEkit, canary, str(root))
+    guard_env(pEkit, canary, None)
+    glE2 = [json.loads(x) for x in read(cacheE / f"claude-{HE2}.guard.jsonl").splitlines() if x.strip()]
+    check("T34 -1(b)：CLAUDE_PROJECT_DIR＝專案上層 → nested true；沒有這個環境變數 → nested false；心跳不記路徑",
+          [g.get("nested") for g in glE2] == [True, False] and str(root) not in read(cacheE / f"claude-{HE2}.guard.jsonl")
+          and "p34-exposure" not in read(cacheE / f"claude-{HE2}.guard.jsonl"), json.dumps(glE2, ensure_ascii=False))
+    write(pE / ".ai-review/reviews/R-20990109-0002.md", front("R-20990109-0002", "review", handoff=HE2, target=snE2["target"],
+                                                             reviewer="claude-isolated", verdict="no-blocking-found", blocking=0,
+                                                             reviewer_model="fable",
+                                                             reviewer_isolation="subagent;omitClaudeMd:startup-only;no-memory;review-guard"))
+    rc, out, err = kit("claude-review", "--end", HE2, "--model", "fable", cwd=pE, script=pEkit)
+    dE2 = json.loads(read(cacheE / f"claude-{HE2}.done")) if (cacheE / f"claude-{HE2}.done").exists() else {}
+    check("T34 -1(b)：巢狀 → claude_md_exposure 加專案根的 CLAUDE.md、nested true；報告已寫 startup-only 不重複加",
+          rc == 0 and dE2.get("nested") is True and dE2.get("claude_md_exposure") == ["CLAUDE.md", "docs/CLAUDE.md"]
+          and dE2.get("isolation") == "subagent;omitClaudeMd:startup-only;no-memory;review-guard"
+          and "專案根的 CLAUDE.md 也算" in out, out[-400:] + json.dumps(dE2, ensure_ascii=False)[:500])
+    # 非 git 專案：照指紋的收檔規則（不進 EXCLUDE_DIRS），直接呼叫函式
+    ng = root / "t34-nongit-exposure"
+    for rp in ("CLAUDE.md", "sub/CLAUDE.md", "sub/deep/claude.md", "node_modules/x/CLAUDE.md", ".git/CLAUDE.md", ".ai-review/CLAUDE.md"):
+        write(ng / rp, "x\n")
+    probe = ("import json, sys; from pathlib import Path; sys.dont_write_bytecode = True; sys.path.insert(0, sys.argv[1]); import kit; "
+             "print(json.dumps([kit.claude_md_exposure(Path(sys.argv[2]), n) for n in (False, True)]))")
+    rc, out, err = sh([PY, "-c", probe, str(KIT_ROOT / "tools"), str(ng)], cwd=root)
+    check("T34 -1(b)：非 git 專案 → 不進 node_modules／.git／.ai-review，檔名不分大小寫；巢狀才含專案根那份",
+          rc == 0 and json.loads(out) == [["sub/CLAUDE.md", "sub/deep/claude.md"], ["CLAUDE.md", "sub/CLAUDE.md", "sub/deep/claude.md"]],
+          out[-300:] + err[-300:])
+
+    # -4：倉庫外（對話根）的審查員定義：doctor、update、claude-review --begin 往上找、比對，kit 不寫專案外的檔
+    sess34 = root / "t34-session"
+    n34 = new_git_project(sess34 / "sub", "proj34")
+    kit("install", "--target", str(n34))
+    n34kit = n34 / ".ai-review/kit/kit.py"
+    n34agent = n34 / ".claude/agents/independent-reviewer.md"
+    out34 = sess34 / ".claude/agents/independent-reviewer.md"
+    hook_old, hook_new = b"${CLAUDE_PROJECT_DIR}/.ai-review/kit/kit.py", b"${CLAUDE_PROJECT_DIR}/sub/proj34/.ai-review/kit/kit.py"
+
+    def ca34():
+        rc, out, err = kit("doctor", "--json", "--codex", str(root / "no-such-codex.exe"), cwd=n34, script=n34kit)
+        return next((i for i in (json.loads(out) if rc == 0 else {}).get("items", []) if i["key"] == "claude_agent"), {})
+
+    c34 = ca34()
+    check("T34 -4：祖先都沒有倉庫外定義 → doctor 不提", c34 and "倉庫外定義" not in c34.get("detail", ""), json.dumps(c34, ensure_ascii=False))
+    cp = subprocess.run([PY, str(n34kit), "reviewer-agent", "--session-root", str(sess34)], capture_output=True, env=ENV, timeout=120)
+    check("T34 -4：reviewer-agent 輸出（抽成函式後）與專案內定義只差 hook 路徑，逐位元相同（含換行）",
+          cp.returncode == 0 and cp.stdout == n34agent.read_bytes().replace(hook_old, hook_new), cp.stderr.decode("utf-8", "replace")[-300:])
+    cp = subprocess.run([PY, str(n34kit), "reviewer-agent", "--session-root", str(sess34), "--python", "python3"], capture_output=True,
+                        env=ENV, timeout=120)
+    agent_b = n34agent.read_bytes()
+    nlb = b"\r\n" if b"\r\n" in agent_b else b"\n"
+    check("T34 -4：reviewer-agent --python python3 在 CRLF／LF 定義檔都換得了，行尾照原檔",
+          cp.returncode == 0 and (b"command: python3" + nlb) in cp.stdout and b'"-3"' not in cp.stdout
+          and cp.stdout.count(b"\r\n") == (cp.stdout.count(b"\n") if nlb == b"\r\n" else 0), cp.stderr.decode("utf-8", "replace")[-300:])
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess34), "--out", str(out34), cwd=root, script=n34kit)
+    c34 = ca34()
+    check("T34 -4：祖先有同步的倉庫外定義 → doctor 說明加「倉庫外定義同步」",
+          rc == 0 and "倉庫外定義同步" in c34.get("detail", "") and "不同步" not in c34.get("detail", ""), json.dumps(c34, ensure_ascii=False))
+    write(out34, read(out34) + "\n# 舊版留下的一行\n")
+    c34 = ca34()
+    d34 = c34.get("detail", "")
+    check("T34 -4：祖先的倉庫外定義不同步 → doctor ✗，說明寫「與專案內版本不同步（套件更新後沒重產）」與修法指令＋重開 Claude Code",
+          c34.get("ok") is False and "與專案內版本不同步（套件更新後沒重產）" in d34 and "reviewer-agent --target" in d34
+          and f'--session-root "{sess34.resolve()}"' in d34 and f'--out "{out34.resolve()}" --force' in d34
+          and "重開 Claude Code" in d34 and "--python" not in d34, d34)
+    before34 = (out34.read_bytes(), out34.stat().st_mtime_ns)
+    rc, out, err = kit("update", "--target", str(n34), cwd=n34, script=n34kit)
+    check("T34 -4：kit update 不同步 → 印 ⚠️ 與同一條修法指令，倉庫外的檔沒被寫（內容與修改時間不變）",
+          rc == 0 and "⚠️ 倉庫外定義" in out and "reviewer-agent --target" in out
+          and (out34.read_bytes(), out34.stat().st_mtime_ns) == before34, out[-600:] + err[-300:])
+    HN, snN = new_handoff(n34, n34kit, "t34-stale")
+    rc, out, err = kit("claude-review", "--begin", HN, cwd=n34, script=n34kit)
+    runN = json.loads(read(n34 / f".ai-review/.cache/claude-{HN}.running")) if (n34 / f".ai-review/.cache/claude-{HN}.running").exists() else {}
+    check("T34 -4：claude-review --begin 不同步 → 印 ⚠️（不擋，exit 0）、.running 記 agent_stale: true",
+          rc == 0 and "⚠️ 倉庫外定義" in out and runN.get("agent_stale") is True and (out34.read_bytes(), out34.stat().st_mtime_ns) == before34,
+          out[-500:])
+    review_file(n34, "R-20990110-0001", HN, snN["target"])
+    rc, out, err = kit("claude-review", "--end", HN, "--model", "fable", cwd=n34, script=n34kit)
+    dN = json.loads(read(n34 / f".ai-review/.cache/claude-{HN}.done")) if (n34 / f".ai-review/.cache/claude-{HN}.done").exists() else {}
+    check("T34 -4：--end 把 agent_stale: true 帶進 .done", rc == 0 and dN.get("agent_stale") is True, out[-400:] + json.dumps(dN)[:300])
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess34), "--python", "python3", "--out", str(out34), "--force",
+                       cwd=root, script=n34kit)
+    c34 = ca34()
+    check("T34 -4：倉庫外定義用 python3 產生 → doctor 讀那份的 command 行比對，判同步", rc == 0 and "倉庫外定義同步" in c34.get("detail", ""),
+          json.dumps(c34, ensure_ascii=False))
+    write(out34, read(out34).replace("independent-reviewer", "independent-reviewer-old", 1))
+    c34 = ca34()
+    check("T34 -4：python3 版不同步 → 修法指令帶 --python python3", c34.get("ok") is False and "--python python3" in c34.get("detail", ""),
+          json.dumps(c34, ensure_ascii=False))
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess34), "--out", str(out34), "--force", cwd=root, script=n34kit)
+    HN2, snN2 = new_handoff(n34, n34kit, "t34-synced")
+    rc, out, err = kit("claude-review", "--begin", HN2, cwd=n34, script=n34kit)
+    runN2 = json.loads(read(n34 / f".ai-review/.cache/claude-{HN2}.running")) if (n34 / f".ai-review/.cache/claude-{HN2}.running").exists() else {}
+    check("T34 -4：同步時 --begin 不印 ⚠️、.running 沒有 agent_stale", rc == 0 and "倉庫外定義" not in out and "agent_stale" not in runN2,
+          out[-400:])
 
     # ---------------- 總結
     fails = [r for r in RESULTS if not r[1]]
