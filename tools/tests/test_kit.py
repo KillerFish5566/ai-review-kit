@@ -1611,11 +1611,16 @@ def main():
     rc, out, err = kit("gate", "--allow-no-guard", cwd=p34, script=p34kit)
     check("T34 -3：gate --allow-no-guard → 放行（exit 0）並印提醒", rc == 0 and "通過條件成立" in out and "已帶 --allow-no-guard" in out,
           out[-600:])
-    os.replace(cache34 / f"claude-{HG1}.done", cache34 / f"claude-{HG1}.done.t34-moved")
+    hold34 = root / "t34-cache-hold"
+    hold34.mkdir(exist_ok=True)
+    moved34 = [x.name for x in cache34.iterdir() if x.name.startswith(f"claude-{HG1}.")]
+    for n in moved34:
+        os.replace(cache34 / n, hold34 / n)
     rc, out, err = kit("gate", cwd=p34, script=p34kit)
-    check("T34 -3：本機沒有 .done（換電腦、CI）→ 不擋（exit 0），印「本機沒有這份審查的收尾紀錄，守門有沒有生效無法核對」",
+    check("T34 -3：本機完全沒有這份交接的隔離審查紀錄（換電腦、CI）→ 不擋（exit 0），印「本機沒有這份審查的收尾紀錄，守門有沒有生效無法核對」",
           rc == 0 and "通過條件成立" in out and "本機沒有這份審查的收尾紀錄，守門有沒有生效無法核對" in out, out[-600:])
-    os.replace(cache34 / f"claude-{HG1}.done.t34-moved", cache34 / f"claude-{HG1}.done")
+    for n in moved34:
+        os.replace(hold34 / n, cache34 / n)
     HG2, snG2 = new_handoff(p34, p34kit, "t34-gate-b")
     kit("claude-review", "--begin", HG2, cwd=p34, script=p34kit)
     rc, out, err = guard_call(p34kit, {"tool_name": "Write", "tool_input": {
@@ -1715,7 +1720,15 @@ def main():
         return next((i for i in (json.loads(out) if rc == 0 else {}).get("items", []) if i["key"] == "claude_agent"), {})
 
     c34 = ca34()
-    check("T34 -4：祖先都沒有倉庫外定義 → doctor 不提", c34 and "倉庫外定義" not in c34.get("detail", ""), json.dumps(c34, ensure_ascii=False))
+    probe_oa = ("import json, sys; from pathlib import Path; sys.dont_write_bytecode = True; sys.path.insert(0, sys.argv[1]); import kit; "
+                "print(json.dumps([dict(c, root=str(c['root']), path=str(c['path'])) for c in "
+                "kit.outside_agent_copies(Path(sys.argv[2]), stop_at=Path(sys.argv[3]))], ensure_ascii=False))")
+    rc, out, err = sh([PY, "-c", probe_oa, str(KIT_ROOT / "tools"), str(n34), str(root)], cwd=root)
+    check("T34 -4：祖先都沒有倉庫外定義（假根＝測試根，不受測試機家目錄影響）→ outside_agent_copies 回 []",
+          rc == 0 and json.loads(out) == [], out[-300:] + err[-300:])
+    d34 = c34.get("detail", "")
+    check("T34 -4：祖先都沒有倉庫外定義 → doctor 不提測試根底下的定義、沒有不同步與 --force",
+          c34 and str(sess34.resolve()) not in d34 and "不同步" not in d34 and "--force" not in d34, json.dumps(c34, ensure_ascii=False))
     cp = subprocess.run([PY, str(n34kit), "reviewer-agent", "--session-root", str(sess34)], capture_output=True, env=ENV, timeout=120)
     check("T34 -4：reviewer-agent 輸出（抽成函式後）與專案內定義只差 hook 路徑，逐位元相同（含換行）",
           cp.returncode == 0 and cp.stdout == n34agent.read_bytes().replace(hook_old, hook_new), cp.stderr.decode("utf-8", "replace")[-300:])
@@ -1767,6 +1780,178 @@ def main():
     runN2 = json.loads(read(n34 / f".ai-review/.cache/claude-{HN2}.running")) if (n34 / f".ai-review/.cache/claude-{HN2}.running").exists() else {}
     check("T34 -4：同步時 --begin 不印 ⚠️、.running 沒有 agent_stale", rc == 0 and "倉庫外定義" not in out and "agent_stale" not in runN2,
           out[-400:])
+
+    # ---------------- T35 修正輪（T-0204-R1）：R1-1 別的專案的倉庫外定義、R1-2 --begin --again 不蓋證據、R1-3 重複 id、R1-6 補測
+    # R1-1：同一個對話根底下兩個專案，對話根那份審查員定義屬於 a/projA
+    sess35 = root / "t35-session"
+    pA = new_git_project(sess35 / "a", "projA")
+    pB = new_git_project(sess35 / "b", "projB")
+    kit("install", "--target", str(pA))
+    kit("install", "--target", str(pB))
+    pAkit, pBkit = pA / ".ai-review/kit/kit.py", pB / ".ai-review/kit/kit.py"
+    out35 = sess35 / ".claude/agents/independent-reviewer.md"
+
+    def ca35(proj, script):
+        rc, out, err = kit("doctor", "--json", "--codex", str(root / "no-such-codex.exe"), cwd=proj, script=script)
+        return next((i for i in (json.loads(out) if rc == 0 else {}).get("items", []) if i["key"] == "claude_agent"), {})
+
+    cB0 = ca35(pB, pBkit)
+    rc, out, err = kit("reviewer-agent", "--session-root", str(sess35), "--out", str(out35), cwd=root, script=pAkit)
+    check("T35 R1-1 前置：對話根放 projA 的倉庫外定義（hook 指向 a/projA）",
+          rc == 0 and "${CLAUDE_PROJECT_DIR}/a/projA/.ai-review/kit/kit.py" in read(out35), out[-300:] + err[-300:])
+    before35 = (out35.read_bytes(), out35.stat().st_mtime_ns)
+    cA = ca35(pA, pAkit)
+    check("T35 R1-1：projA 的 doctor 照舊判「倉庫外定義同步」", "倉庫外定義同步" in cA.get("detail", "") and "不同步" not in cA.get("detail", ""),
+          json.dumps(cA, ensure_ascii=False))
+    cB = ca35(pB, pBkit)
+    dB = cB.get("detail", "")
+    check("T35 R1-1：別的專案（projB）的 doctor → 不列 ✗（ok 與沒有那份時相同）、說明「屬於 a/projA，不是本專案」、沒有不同步與 --force",
+          cB.get("ok") == cB0.get("ok") and "屬於 a/projA" in dB and "不是本專案" in dB and "不同步" not in dB and "--force" not in dB,
+          json.dumps(cB0, ensure_ascii=False)[:200] + " / " + json.dumps(cB, ensure_ascii=False))
+    rc, out, err = kit("update", "--target", str(pB), cwd=pB, script=pBkit)
+    check("T35 R1-1：projB 的 update → 只印 ℹ️ 說明，沒有 ⚠️ 不同步、沒有 --force，倉庫外的檔沒被寫",
+          rc == 0 and "ℹ️ 上層" in out and "屬於 a/projA" in out and "⚠️ 倉庫外定義" not in out and "--force" not in out
+          and (out35.read_bytes(), out35.stat().st_mtime_ns) == before35, out[-600:] + err[-300:])
+    HB, snB = new_handoff(pB, pBkit, "t35-other-owner")
+    rc, out, err = kit("claude-review", "--begin", HB, cwd=pB, script=pBkit)
+    runB = json.loads(read(pB / f".ai-review/.cache/claude-{HB}.running")) if (pB / f".ai-review/.cache/claude-{HB}.running").exists() else {}
+    check("T35 R1-1：projB 的 claude-review --begin → exit 0、印 ℹ️ 說明、.running 沒有 agent_stale、輸出沒有 --force",
+          rc == 0 and "屬於 a/projA" in out and "agent_stale" not in runB and "--force" not in out and "⚠️ 倉庫外定義" not in out,
+          out[-600:] + json.dumps(runB, ensure_ascii=False)[:200])
+    review_file(pB, "R-20990111-0001", HB, snB["target"])
+    rc, out, err = kit("claude-review", "--end", HB, "--model", "fable", cwd=pB, script=pBkit)
+    dnB = json.loads(read(pB / f".ai-review/.cache/claude-{HB}.done")) if (pB / f".ai-review/.cache/claude-{HB}.done").exists() else {}
+    check("T35 R1-1：projB 的 --end → .done 沒有 agent_stale", rc == 0 and "agent_stale" not in dnB, out[-400:] + json.dumps(dnB)[:300])
+    # 函式層（假根＝sess35）：mine／owner／使用者層／解析不出／對話根本身是專案
+    probe35 = ("import json, sys; from pathlib import Path; sys.dont_write_bytecode = True; sys.path.insert(0, sys.argv[1]); import kit; "
+               "h = sys.argv[4]\n"
+               "if h: Path.home = classmethod(lambda cls: Path(h))\n"
+               "cs = kit.outside_agent_copies(Path(sys.argv[2]), stop_at=Path(sys.argv[3]))\n"
+               "print(json.dumps([dict(c, root=str(c['root']), path=str(c['path']), text=('' if c['mine'] else kit.outside_agent_other_text(c))) "
+               "for c in cs], ensure_ascii=False))")
+
+    def oa35(proj, home=""):
+        rc, out, err = sh([PY, "-c", probe35, str(KIT_ROOT / "tools"), str(proj), str(sess35), home], cwd=root)
+        return json.loads(out) if rc == 0 else [{"err": err[-300:]}]
+
+    oA, oB = oa35(pA), oa35(pB)
+    check("T35 R1-1：outside_agent_copies：projA → mine、owner a/projA、synced；projB → 不是 mine、owner a/projA、synced None",
+          [(c.get("mine"), c.get("owner"), c.get("synced")) for c in oA] == [(True, "a/projA", True)]
+          and [(c.get("mine"), c.get("owner"), c.get("synced")) for c in oB] == [(False, "a/projA", None)],
+          json.dumps(oA + oB, ensure_ascii=False)[:600])
+    oH = oa35(pB, str(sess35))
+    check("T35 R1-1：上層那份在使用者層（家目錄）→ user_level、說明寫「使用者層的審查員定義…不是本專案」，同樣不判不同步",
+          len(oH) == 1 and oH[0].get("user_level") is True and oH[0].get("mine") is False and "使用者層的審查員定義" in oH[0].get("text", "")
+          and "不是本專案" in oH[0].get("text", ""), json.dumps(oH, ensure_ascii=False)[:500])
+    oHA = oa35(pA, str(sess35))
+    check("T35 R1-1：使用者層那份的 hook 指向本專案（reviewer-agent --session-root 家目錄產的）→ 照常比對（mine、synced）",
+          [(c.get("mine"), c.get("user_level"), c.get("synced")) for c in oHA] == [(True, True, True)], json.dumps(oHA, ensure_ascii=False)[:400])
+    midB = sess35 / "b/.claude/agents/independent-reviewer.md"
+    write(midB, "---\nname: independent-reviewer\n---\n沒有 hook 路徑\n")
+    oB2 = oa35(pB)
+    write(midB, read(pB / ".claude/agents/independent-reviewer.md"))
+    oB3 = oa35(pB)
+    check("T35 R1-1：解析不出 hook 路徑 → 不是 mine、說明「無法判斷屬於哪個專案」；hook 指向對話根本身 → 說明「屬於 <上層> 本身」",
+          [(c.get("mine"), c.get("owner")) for c in oB2] == [(False, None), (False, "a/projA")] and "無法判斷屬於哪個專案" in oB2[0].get("text", "")
+          and [(c.get("mine"), c.get("owner")) for c in oB3] == [(False, ""), (False, "a/projA")] and "本身" in oB3[0].get("text", ""),
+          json.dumps(oB2 + oB3, ensure_ascii=False)[:800])
+    cB4 = ca35(pB, pBkit)
+    check("T35 R1-1：兩層上層都不屬於本專案 → doctor 仍不列 ✗、沒有 --force", cB4.get("ok") == cB0.get("ok") and "--force" not in cB4.get("detail", ""),
+          json.dumps(cB4, ensure_ascii=False))
+    write(out35, read(out35) + "\n# 舊版留下的一行\n")
+    cA2 = ca35(pA, pAkit)
+    check("T35 R1-1：屬於本專案（projA）的那份不同步 → doctor 照舊 ✗ 並給 --force 修法",
+          cA2.get("ok") is False and "與專案內版本不同步" in cA2.get("detail", "") and "--force" in cA2.get("detail", ""),
+          json.dumps(cA2, ensure_ascii=False))
+
+    # R1-2：--begin --again 不清掉 gate 要用的證據
+    pG = new_git_project(root, "p35-gate")
+    kit("install", "--target", str(pG))
+    pGkit = pG / ".ai-review/kit/kit.py"
+    cacheG = pG / ".ai-review/.cache"
+    canaryG = {"tool_name": "Bash", "tool_input": {"command": "echo guard-canary"}, "cwd": str(pG)}
+    H1, sn1 = new_handoff(pG, pGkit, "t35-again")
+    kit("claude-review", "--begin", H1, cwd=pG, script=pGkit)
+    review_file(pG, "R-20990112-0001", H1, sn1["target"])
+    rc, out, err = kit("claude-review", "--end", H1, "--model", "fable", cwd=pG, script=pGkit)
+    hist1 = [json.loads(x) for x in read(cacheG / f"claude-{H1}.history.jsonl").splitlines() if x.strip()] \
+        if (cacheG / f"claude-{H1}.history.jsonl").exists() else []
+    check("T35 R1-2：--end 追加收尾歷史 claude-<H>.history.jsonl（R 編號、守門心跳筆數、時間）",
+          rc == 0 and len(hist1) == 1 and hist1[0].get("review") == "R-20990112-0001" and hist1[0].get("guard_calls") == 0
+          and hist1[0].get("finished"), json.dumps(hist1, ensure_ascii=False))
+    rc, out, err = kit("claude-review", "--begin", H1, "--again", cwd=pG, script=pGkit)
+    check("T35 R1-2 前置：--begin --again 清掉 .done、收尾歷史保留", rc == 0 and not (cacheG / f"claude-{H1}.done").exists()
+          and (cacheG / f"claude-{H1}.history.jsonl").exists(), out[-300:])
+    rc, out, err = kit("gate", cwd=pG, script=pGkit)
+    check("T35 R1-2：守門 0 筆的審查收尾後又 --begin --again（重派還沒收尾）→ gate 仍 exit 1（守門心跳 0 筆）",
+          rc == 1 and "守門心跳 0 筆" in out and "通過條件成立" not in out, out[-600:])
+    rc, out, err = guard_call(pGkit, canaryG)
+    review_file(pG, "R-20990112-0002", H1, sn1["target"])
+    rc, out, err = kit("claude-review", "--end", H1, "--model", "fable", cwd=pG, script=pGkit)
+    rc, out, err = kit("gate", cwd=pG, script=pGkit)
+    check("T35 R1-2：重派的審查守門有生效（心跳 1 筆）並收尾 → gate 通過（正常補救流程不被誤擋）",
+          rc == 0 and "通過條件成立" in out, out[-600:])
+    H2, sn2 = new_handoff(pG, pGkit, "t35-no-close")
+    kit("claude-review", "--begin", H2, cwd=pG, script=pGkit)
+    review_file(pG, "R-20990112-0003", H2, sn2["target"])
+    rc, out, err = kit("gate", cwd=pG, script=pGkit)
+    check("T35 R1-2：本機有這份交接的開審紀錄、這份 R 卻沒收尾 → gate exit 1（說明沒有收尾紀錄、要先 --end、--allow-no-guard）",
+          rc == 1 and "卻沒有這份審查的收尾紀錄" in out and f"claude-review --end {H2}" in out and "--allow-no-guard" in out
+          and "通過條件成立" not in out, out[-600:])
+    rc, out, err = kit("gate", "--allow-no-guard", cwd=pG, script=pGkit)
+    check("T35 R1-2：同上加 --allow-no-guard → 放行並印提醒", rc == 0 and "通過條件成立" in out and "已帶 --allow-no-guard" in out, out[-600:])
+    holdG = root / "t35-cache-hold"
+    holdG.mkdir(exist_ok=True)
+    movedG = [x.name for x in cacheG.iterdir() if x.name.startswith(f"claude-{H2}.")]
+    for n in movedG:
+        os.replace(cacheG / n, holdG / n)
+    rc, out, err = kit("gate", cwd=pG, script=pGkit)
+    check("T35 R1-2：整台都沒有這份交接的紀錄（換電腦、CI）→ 維持只提示、exit 0",
+          rc == 0 and "通過條件成立" in out and "本機沒有這份審查的收尾紀錄，守門有沒有生效無法核對" in out, out[-600:])
+    for n in movedG:
+        os.replace(holdG / n, cacheG / n)
+    # 冒充證據不被 --begin --again 清掉：心跳輪替成 claude-<H>.prev-<時間>.guard.jsonl
+    H3, sn3 = new_handoff(pG, pGkit, "t35-impostor-again")
+    kit("claude-review", "--begin", H3, cwd=pG, script=pGkit)
+    rc, out, err = guard_call(pGkit, {"tool_name": "Write", "tool_input": {
+        "file_path": str(pG.resolve() / ".ai-review/reviews/R-20990112-0004.md"), "content": "x"}, "cwd": str(pG)})
+    review_file(pG, "R-20990112-0004", H3, sn3["target"], reviewer="codex", model=None)
+    rc, out, err = kit("claude-review", "--begin", H3, "--again", cwd=pG, script=pGkit)
+    prevs = sorted(x.name for x in cacheG.glob(f"claude-{H3}.prev-*.guard.jsonl"))
+    check("T35 R1-2：--begin --again → 有內容的心跳改名保留（claude-<H>.prev-<時間>.guard.jsonl，含寫檔紀錄）、新的心跳從空檔開始、畫面說明改名",
+          rc == 0 and len(prevs) == 1 and '"file": "R-20990112-0004.md"' in read(cacheG / prevs[0])
+          and read(cacheG / f"claude-{H3}.guard.jsonl") == "" and "守門心跳舊紀錄改名保留" in out, out[-400:] + str(prevs))
+    rc, out, err = kit("gate", cwd=pG, script=pGkit)
+    check("T35 R1-2：隔離審查員寫的報告冒充 codex，開發端 --begin --again 重派後 → gate 仍判冒充 exit 1",
+          rc == 1 and "冒充 Codex" in out and "通過條件成立" not in out, out[-600:])
+    rc, out, err = kit("gate", "--require-reviewer", "codex", cwd=pG, script=pGkit)
+    check("T35 R1-2：同上 --require-reviewer codex 也 exit 1（冒充）", rc == 1 and "冒充" in out, out[-600:])
+    rc, out, err = kit("claude-review", "--begin", H3, "--again", cwd=pG, script=pGkit)
+    check("T35 R1-2：心跳是空檔時 --again 不多產生輪替檔",
+          rc == 0 and len(list(cacheG.glob(f"claude-{H3}.prev-*.guard.jsonl"))) == 1 and "改名保留" not in out, out[-300:])
+
+    # R1-3：冒充檢查看所有 id 相同的檔（狀態採用排序在後那份）
+    H4, sn4 = new_handoff(pG, pGkit, "t35-dup-id")
+    review_file(pG, "R-20990112-0005", H4, sn4["target"], reviewer="codex", verdict="needs-fix", model=None)
+    kit("claude-review", "--begin", H4, cwd=pG, script=pGkit)
+    rc, out, err = guard_call(pGkit, {"tool_name": "Write", "tool_input": {
+        "file_path": str(pG.resolve() / ".ai-review/reviews/R-20990112-0005z.md"), "content": "x"}, "cwd": str(pG)})
+    write(pG / ".ai-review/reviews/R-20990112-0005z.md", front("R-20990112-0005", "review", handoff=H4, target=sn4["target"],
+                                                               reviewer="codex", verdict="no-blocking-found", blocking=0))
+    rc, out, err = kit("state", "--json", cwd=pG, script=pGkit)
+    stD = json.loads(out) if rc == 0 else {}
+    check("T35 R1-3 前置：兩個檔同 id，狀態採用排序在後、守門寫檔紀錄裡那份（no-blocking-found）",
+          (stD.get("review") or {}).get("verdict") == "no-blocking-found" and stD.get("status") == "no-blocking-found", out[-400:])
+    rc, out, err = kit("gate", cwd=pG, script=pGkit)
+    check("T35 R1-3：同 id 的另一個檔在守門寫檔紀錄裡、檔頭寫 codex → gate exit 1（冒充）",
+          rc == 1 and "冒充 Codex" in out and "通過條件成立" not in out, out[-600:])
+
+    # R1-6：git 專案裡 git ls-files 失敗 → claude_md_exposure 退回 os.walk（GIT_DIR 指到不存在的資料夾讓 git 失敗）
+    rc, out, err = sh([PY, "-c", probe.replace("kit.claude_md_exposure(Path(sys.argv[2]), n)", "kit.claude_md_exposure(Path(sys.argv[2]), n, True)"),
+                       str(KIT_ROOT / "tools"), str(ng)], cwd=root, env=dict(ENV, GIT_DIR=str(root / "no-such-git-dir")))
+    check("T35 R1-6：is_git 但 git ls-files 失敗 → 退回 os.walk（結果與非 git 專案相同）",
+          rc == 0 and json.loads(out) == [["sub/CLAUDE.md", "sub/deep/claude.md"], ["CLAUDE.md", "sub/CLAUDE.md", "sub/deep/claude.md"]],
+          out[-300:] + err[-300:])
 
     # ---------------- 總結
     fails = [r for r in RESULTS if not r[1]]

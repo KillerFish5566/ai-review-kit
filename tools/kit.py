@@ -715,7 +715,8 @@ def do_install_or_update(args, mode):
           "再在專案根目錄開 Claude Code 跑 /safety-setup（每個專案一次）。hooks 要重開 Claude Code 才載入。")
     if any(a["rel"] == AGENT_DST_REL and a["action"] in ("add", "update", "update(forced)") for a in actions):
         print(f"審查員子代理定義（{AGENT_DST_REL}）已寫入：第一次裝 agent 檔要重開 Claude Code（新的 agents 資料夾要重開才會被發現）。")
-    for line in outside_agent_stale_lines(target):     # 巢狀專案的倉庫外定義（R-20261101-1302-4）：只提醒，不寫專案外的檔
+    stale_o, info_o = outside_agent_lines(target)
+    for line in stale_o + info_o:     # 巢狀專案的倉庫外定義（R-20261101-1302-4／T-0204-R1-1）：只提醒，不寫專案外的檔
         print(line)
     src.cleanup()
     return 0
@@ -1244,14 +1245,54 @@ def pick_review(valid_reviews):
     return cur, skipped, held
 
 
-def claude_guard_observed(target, hid, rid):
-    """claude-<H>.done 記的守門心跳：有對應這份 R 的 .done 才判斷（True／False）；沒有 .done 或不是這份 R → None。"""
+def claude_history_path(target, hid):
+    """隔離 Claude 審查的收尾歷史：.ai-review/.cache/claude-<H>.history.jsonl（claude-review --end 每次追加一行：R 編號、守門心跳
+    筆數、時間）。--begin（含 --again）不清（T-0204-R1-2：證據不被下一次開審蓋掉；.done 會被 --begin 清掉）。"""
+    return Path(target) / ".ai-review" / ".cache" / f"claude-{hid}.history.jsonl"
+
+
+def claude_close_record(target, hid, rid):
+    """這份 R 的收尾紀錄（dict，含 guard_calls）：先看 claude-<H>.done，再看收尾歷史（後寫的為準）；都沒有 → None。"""
     d = load_json(Path(target) / ".ai-review" / ".cache" / f"claude-{hid}.done", None)
-    if not isinstance(d, dict) or d.get("review") != rid or "guard_calls" not in d:
+    if isinstance(d, dict) and d.get("review") == rid and "guard_calls" in d:
+        return d
+    found = None
+    try:
+        lines = read_text(claude_history_path(target, hid)).splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            g = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(g, dict) and g.get("review") == rid and "guard_calls" in g:
+            found = g
+    return found
+
+
+def claude_guard_observed(target, hid, rid):
+    """這份 R 收尾時記的守門心跳：有收尾紀錄（.done 或收尾歷史）才判斷（True／False）；沒有 → None。"""
+    d = claude_close_record(target, hid, rid)
+    if d is None:
         return None
     try:
         return int(d.get("guard_calls") or 0) > 0
     except (TypeError, ValueError):
+        return False
+
+
+def claude_local_records(target, hid):
+    """本機有沒有這份交接的隔離 Claude 審查紀錄（開審 .running、收尾 .done、收尾歷史、守門心跳含輪替下來的舊檔）。
+    gate 用來分辨「這台電腦開過審卻沒收尾這份 R」（不放行）與「整台都沒紀錄」（換電腦、CI：只提示）。"""
+    cache = Path(target) / ".ai-review" / ".cache"
+    names = [f"claude-{hid}.running", f"claude-{hid}.done", f"claude-{hid}.history.jsonl", f"claude-{hid}.guard.jsonl"]
+    try:
+        if any((cache / n).exists() for n in names):
+            return True
+        pre = _name_key(f"claude-{hid}.")
+        return any(_name_key(x.name).startswith(pre) for x in cache.glob("claude-*.guard.jsonl"))
+    except OSError:
         return False
 
 
@@ -1435,8 +1476,10 @@ def do_gate(args):
         rid = rv.get("id")
         # 冒充（R-20261101-1302-3 b，不限 --require-reviewer）：報告檔頭的 reviewer 是審查者自己寫的（RV-2）。這份報告若出現在
         # 隔離 Claude 審查員的守門寫檔紀錄裡、檔頭卻不是 claude-isolated → 不放行。紀錄在 .cache（不進版控），所以是本機關卡。
-        fname = next((r.get("_file") for r in reports(target, "reviews") if r.get("id") == rid), None) or f"{rid}.md"
-        if who != CLAUDE_REVIEWER and _name_key(fname) in guard_written_files(target):
+        # 同一個 id 可能有好幾個檔（檔頭 id 是審查員自己寫的），狀態採用最後一份：任一份在守門寫檔紀錄裡就擋（T-0204-R1-3）
+        fnames = [r.get("_file") for r in reports(target, "reviews") if r.get("id") == rid and r.get("_file")] or [f"{rid}.md"]
+        written = guard_written_files(target)
+        if who != CLAUDE_REVIEWER and any(_name_key(f) in written for f in fnames):
             print(f"\n關卡：不成立——審查 {rid} 檔頭寫 {who or '空'}，但守門紀錄（.ai-review/.cache/claude-*.guard.jsonl）顯示"
                   f"這個檔是隔離 Claude 審查員寫的：冒充{' Codex ' if who == 'codex' else ' ' + (who or '其他審查者') + ' '}審查，不放行。"
                   "用 kit.py codex-review 送 Codex 審，或重派隔離 Claude 審查（報告檔頭照實寫 claude-isolated）。")
@@ -1461,19 +1504,32 @@ def do_gate(args):
             else:
                 print("未見 codex-review 執行紀錄（手動開 Codex 審查），依報告檔頭採信；守門沒生效時無法分辨")
         if who == CLAUDE_REVIEWER:
-            # 守門沒生效（R-20261101-1302-3 a，不限 --require-reviewer）：claude-<H>.done 記守門心跳 0 筆 → 不放行，
-            # 除非明確 --allow-no-guard。本機沒有 .done（換電腦、CI）→ 核對不了，只提示、不擋（CI 範本跑的就是一般 gate）。
+            # 守門沒生效（R-20261101-1302-3 a，不限 --require-reviewer）：這份 R 的收尾紀錄（claude-<H>.done 或收尾歷史）記守門
+            # 心跳 0 筆 → 不放行，除非明確 --allow-no-guard。整台都沒有這份交接的紀錄（換電腦、CI）→ 核對不了，只提示、不擋
+            # （CI 範本跑的就是一般 gate）。
             go = rv.get("guard_observed")
             if go is False:
                 if not getattr(args, "allow_no_guard", False):
                     print(f"\n關卡：不成立——最新有效審查 {rid} 是隔離 Claude 審查，但收尾紀錄"
-                          f"（.ai-review/.cache/claude-{(out.get('handoff') or {}).get('id')}.done）記守門心跳 0 筆：守門沒有生效，"
+                          f"（.ai-review/.cache/claude-{(out.get('handoff') or {}).get('id')}.done 或 .history.jsonl）記守門心跳 0 筆：守門沒有生效，"
                           "審查員的寫入與指令都沒被擋。先讓守門生效再重派（claude-review --begin <H> --again），或改送 Codex"
                           "（kit.py codex-review --again）；確定接受這份審查才加 --allow-no-guard。")
                     return 1
                 print("提醒：已帶 --allow-no-guard——這份隔離 Claude 審查的守門沒有生效（心跳 0 筆），照你的指示放行。")
             elif go is None:
-                print("本機沒有這份審查的收尾紀錄，守門有沒有生效無法核對（例如換電腦、CI：.ai-review/.cache/ 不進版控）")
+                hid_g = (out.get("handoff") or {}).get("id")
+                if hid_g and claude_local_records(target, hid_g):
+                    # 本機開過這份交接的隔離審查，卻沒有這份 R 的收尾紀錄（還沒 --end，或收尾後又 --begin --again 重派而沒收尾）
+                    # → 守門有沒有生效核對不了，不放行（T-0204-R1-2）；整台都沒紀錄才只提示
+                    if not getattr(args, "allow_no_guard", False):
+                        print(f"\n關卡：不成立——最新有效審查 {rid} 是隔離 Claude 審查，本機有交接 {hid_g} 的審查紀錄"
+                              f"（.ai-review/.cache/claude-{hid_g}.*），卻沒有這份審查的收尾紀錄：守門有沒有生效核對不了。"
+                              f"還沒收尾就先跑 claude-review --end {hid_g} --model <別名>；重派後的審查也要收尾；"
+                              "或改送 Codex（kit.py codex-review --again）；確定接受這份審查才加 --allow-no-guard。")
+                        return 1
+                    print("提醒：已帶 --allow-no-guard——本機沒有這份隔離 Claude 審查的收尾紀錄（守門有沒有生效核對不了），照你的指示放行。")
+                else:
+                    print("本機沒有這份審查的收尾紀錄，守門有沒有生效無法核對（例如換電腦、CI：.ai-review/.cache/ 不進版控）")
         print("\n關卡：通過條件成立——最新交接已有獨立審查「本次範圍內未發現阻擋問題」，且指紋相符。")
         print("提醒：這是本地檢查，可被略過；遠端保護規則要另外在 GitHub 設定。")
         return 0
@@ -1913,6 +1969,23 @@ def guard_log_path(target, hid):
     return Path(target) / ".ai-review" / ".cache" / f"claude-{hid}.guard.jsonl"
 
 
+def rotate_guard_log(glog, hid):
+    """有內容的守門心跳檔改名成 claude-<H>.prev-<時間>[-n].guard.jsonl（仍符合 claude-*.guard.jsonl，guard_written_files 照讀）。
+    空檔或沒有 → None；改名失敗 → OSError（呼叫端停下，不蓋掉證據）。"""
+    try:
+        if glog.stat().st_size == 0:
+            return None
+    except FileNotFoundError:
+        return None
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for n in range(1000):
+        dst = glog.with_name(f"claude-{hid}.prev-{stamp}{'' if n == 0 else f'-{n}'}.guard.jsonl")
+        if not dst.exists():
+            os.replace(glog, dst)
+            return dst
+    raise OSError("找不到可用的輪替檔名")
+
+
 def guard_log_count(target, hid):
     try:
         with open(guard_log_path(target, hid), "rb") as f:
@@ -1924,9 +1997,9 @@ def guard_log_count(target, hid):
 def do_claude_review(args):
     """隔離 Claude 子代理審查的開始與收尾。子代理由開發端（Claude Code 的 Agent 工具）派，kit 只管前後：
     --begin：拒絕條件同 codex-review → 寫 .cache/claude-<H>.running（pid、開始時間、審前工作區清單、審前報告清單）、
-             清空守門心跳 claude-<H>.guard.jsonl → 印派工資訊。
+             守門心跳 claude-<H>.guard.jsonl 有舊紀錄就改名保留（不清空）、從空檔開始 → 印派工資訊。
     --end：只收這次新寫、reviewer=claude-isolated 且 handoff／target 相符的 R → 舊 R 被改刪或新 R 的 reviewer 不對 → exit 1；
-           守門心跳 0 筆 → 顯眼警告（照收、標守門未生效）→ 審後比對（只警告、不刪）→ 寫 .done → 推導狀態。"""
+           守門心跳 0 筆 → 顯眼警告（照收、標守門未生效）→ 審後比對（只警告、不刪）→ 寫 .done、追加收尾歷史 → 推導狀態。"""
     target = resolve_target(args)
     if not (target / ".ai-review").is_dir():
         raise SystemExit("找不到 .ai-review/：請先安裝套件。")
@@ -1946,19 +2019,29 @@ def claude_review_begin(target, args):
         return 1
     kit_py = (target / ".ai-review" / "kit" / "kit.py").as_posix()
     glog = guard_log_path(target, hid)
-    stale = outside_agent_stale_lines(target)     # 倉庫外定義不同步（R-20261101-1302-4）：不擋，記 agent_stale
+    stale, info_o = outside_agent_lines(target)     # 倉庫外定義不同步（R-20261101-1302-4）：不擋，記 agent_stale；別的專案的只說明
     extra = {"reviewer": CLAUDE_REVIEWER}
     if stale:
         extra["agent_stale"] = True
     if args.print_only:
         print("（--print：只顯示會做什麼，沒有寫任何檔）")
-        print(f"將寫：{rel(running, target)}（pid、開始時間、審前工作區清單、審前報告清單）；清空 {rel(glog, target)}；"
-              f"清掉舊的 {rel(done, target)}")
+        print(f"將寫：{rel(running, target)}（pid、開始時間、審前工作區清單、審前報告清單）；{rel(glog, target)} 有舊紀錄就改名保留"
+              f"（claude-{hid}.prev-<時間>.guard.jsonl）再從空檔開始；清掉舊的 {rel(done, target)}（收尾歷史 "
+              f"{rel(claude_history_path(target, hid), target)} 保留）")
     else:
+        # 守門心跳從這次開始算；舊紀錄改名保留、不清空（T-0204-R1-2：gate 的冒充檢查要讀得到上一次審查員的寫檔紀錄）
+        try:
+            rotated = rotate_guard_log(glog, hid)
+        except OSError as e:
+            print(f"守門心跳舊紀錄 {rel(glog, target)} 改名保留失敗（{str(e)[:200]}）：為了不蓋掉證據，這次不開審。"
+                  "關掉占用這個檔的程式後再跑一次。")
+            return 1
         review_begin(target, hid, st["git"], done, running, keep_listing=True, extra=extra)
-        write_text(glog, "")     # 守門心跳從這次開始算
+        write_text(glog, "")
+        if rotated:
+            print(f"守門心跳舊紀錄改名保留：{rel(rotated, target)}")
         print(f"已記下審查開始：{rel(running, target)}" + ("（記 agent_stale: true）" if stale else ""))
-    for line in stale:
+    for line in stale + info_o:
         print(line)
     print(f"可派審查員：交接 {hid}")
     print(f"專案（絕對路徑）：{target.as_posix()}")
@@ -2097,6 +2180,14 @@ def claude_review_end(target, args):
     if problems:
         info["review_integrity"] = {"modified": modified, "removed": removed, "wrong_reviewer": wrong}
     warn = review_end(target, pre, out0, info, done, log=None, again_hint=f"`claude-review --begin {hid} --again` 重派審查員")
+    # 收尾歷史（T-0204-R1-2）：.done 會被下一次 --begin 清掉，這份不清，gate 照 R 編號找得到這次記的守門心跳
+    try:
+        with open(claude_history_path(target, hid), "ab") as hf:
+            hf.write((json.dumps({"review": R.get("id"), "guard_calls": guard_calls, "finished": info.get("finished")},
+                                 ensure_ascii=False) + "\n").encode("utf-8"))
+    except OSError as e:
+        warn.append(f"⚠️ 收尾歷史 {rel(claude_history_path(target, hid), target)} 寫不進去（{str(e)[:200]}）："
+                    "之後若又 --begin 這份交接，gate 會因找不到這份審查的收尾紀錄而不放行。")
     running.unlink(missing_ok=True)
     out = derive_and_write_state(target, quiet=True)
     print(f"隔離 Claude 審查結束：審查報告 {R['id']}  結論 {verdict_text(dict(R, guard_observed=guard_calls > 0))}"
@@ -2637,57 +2728,105 @@ def reviewer_agent_text(text, rel_parts, python=None, src=AGENT_DST_REL):
 
 
 AGENT_OUTSIDE_REL = (".claude", "agents", "independent-reviewer.md")
+# 倉庫外定義裡守門 hook 的 kit.py 路徑：${CLAUDE_PROJECT_DIR}/<rel>/.ai-review/kit/kit.py（rel 空＝對話根本身就是專案）
+AGENT_HOOK_REL_RE = re.compile(r"\$\{CLAUDE_PROJECT_DIR\}/([^\"'\\\x00-\x1f]*?)\.ai-review/kit/kit\.py")
 
 
-def outside_agent_copies(target):
-    """倉庫外的審查員定義（R-20261101-1302-4）：從專案根的上層一路往上到磁碟根，找 <祖先>/.claude/agents/independent-reviewer.md
-    （巢狀專案用 reviewer-agent --session-root 放在對話根的那份），每份都用專案內定義以 session_root=<祖先>、直譯器取自那份檔的
-    command: 行重算應有內容來比（換行統一後全等才算同步）。只 stat 與讀這一個檔名，不列其他檔、不寫任何檔。
-    回傳 [{"root", "path", "python"（None＝py）, "synced", "note"}]；專案內沒有定義或讀不到 → []。"""
+def agent_hook_rel(text):
+    """審查員定義文字 → hook 指向的專案相對對話根的路徑（"a/b"；"" ＝對話根本身）；沒有或有好幾個不同的 → None。"""
+    rels = {m.group(1).rstrip("/") for m in AGENT_HOOK_REL_RE.finditer(norm_nl(text))}
+    return rels.pop() if len(rels) == 1 else None
+
+
+def outside_agent_copies(target, stop_at=None):
+    """倉庫外的審查員定義（R-20261101-1302-4；T-0204-R1-1 修正）：從專案根的上層一路往上到磁碟根（或 stop_at，含），找
+    <祖先>/.claude/agents/independent-reviewer.md（巢狀專案用 reviewer-agent --session-root 放在對話根的那份）。
+    同一個對話根只能放一份 independent-reviewer，那份可能是給同一層底下別的專案用的：先解析那份 hook 的 <rel>，
+    等於本專案相對那一層的路徑（mine）才用專案內定義以 session_root=<祖先>、直譯器取自那份檔的 command: 行重算應有內容來比
+    （換行統一後全等才算同步）；屬於別的專案或解析不出 → mine False、synced None（只給說明，不判不同步、不給 --force）。
+    使用者層（Path.home()/.claude/agents）同一套規則（user_level True）。只 stat 與讀這一個檔名，不列其他檔、不寫任何檔。
+    回傳 [{"root", "path", "python"（None＝py）, "mine", "owner"（hook 的 rel；解析不出 None）, "user_level", "synced", "note"}]；
+    專案內沒有定義或讀不到 → []。"""
     tp = Path(target).resolve()
     own = tp / AGENT_DST_REL
     try:
         own_text = read_text(own)
     except Exception:
         return []
+    try:
+        home = os.path.normcase(str(Path.home().resolve()))
+    except Exception:
+        home = None
+    ancs = list(tp.parents)
+    if stop_at:     # 測試用的假根：只找到 stop_at 為止（含）；stop_at 不是祖先 → 照常找到磁碟根
+        stop = os.path.normcase(str(Path(stop_at).resolve()))
+        keys = [os.path.normcase(str(a)) for a in ancs]
+        if stop in keys:
+            ancs = ancs[:keys.index(stop) + 1]
     found = []
-    for anc in tp.parents:
+    for anc in ancs:
+        key = os.path.normcase(str(anc))
         p = anc.joinpath(*AGENT_OUTSIDE_REL)
+        base = {"root": anc, "path": p, "python": None, "mine": False, "owner": None, "user_level": key == home,
+                "synced": None, "note": None}
         try:
             if not p.is_file():
                 continue
             t = read_text(p)
         except Exception as e:
-            found.append({"root": anc, "path": p, "python": None, "synced": False, "note": f"讀不到（{str(e)[:120]}）"})
+            found.append(dict(base, note=f"讀不到（{str(e)[:120]}）"))
             continue
+        rel_parts = tp.parts[len(anc.parts):]
+        owner = agent_hook_rel(t)
         m = re.search(r"^\s*command:\s*[\"']?([^\s\"']+)", norm_nl(t), re.M)
         pyc = m.group(1) if m and m.group(1) != "py" else None
+        base.update(owner=owner, python=pyc)
+        if owner is None or os.path.normcase(owner) != os.path.normcase("/".join(rel_parts)):
+            found.append(base)
+            continue
         try:
-            want, _ = reviewer_agent_text(own_text, tp.parts[len(anc.parts):], pyc, own)
+            want, _ = reviewer_agent_text(own_text, rel_parts, pyc, own)
             ok, note = norm_nl(want) == norm_nl(t), None
         except AgentTextError as e:
             ok, note = False, e.msg
-        found.append({"root": anc, "path": p, "python": pyc, "synced": ok, "note": note})
+        found.append(dict(base, mine=True, synced=ok, note=note))
     return found
 
 
 def outside_agent_fix(target, c):
-    """不同步那份的修法指令（kit 不自己寫倉庫外的檔：那可能是使用者的設定資料夾）。"""
+    """不同步那份的修法指令（kit 不自己寫倉庫外的檔：那可能是使用者的設定資料夾）。只給 mine 的那份。"""
     tp = Path(target).resolve()
     py_opt = f" --python {c['python']}" if c.get("python") else ""
     return (f"py -3 \"{tp / '.ai-review' / 'kit' / 'kit.py'}\" reviewer-agent --target \"{tp}\" --session-root \"{c['root']}\"{py_opt} "
             f"--out \"{c['path']}\" --force")
 
 
-def outside_agent_stale_lines(target):
-    """不同步的倉庫外定義 → 給人看的提醒行（update、claude-review --begin 用）；都同步或沒有 → []。"""
-    lines = []
+def outside_agent_other_text(c):
+    """不屬於本專案的那份 → 一句說明（不判不同步、不給修法指令；T-0204-R1-1）。"""
+    if c.get("note"):
+        who = f"無法判斷屬於哪個專案（{c['note']}）"
+    elif c.get("owner") is None:
+        who = "無法判斷屬於哪個專案（解析不出守門 hook 的 kit.py 路徑）"
+    elif c["owner"] == "":
+        who = f"屬於 {c['root']} 本身"
+    else:
+        who = f"屬於 {c['owner']}"
+    if c.get("user_level"):
+        return f"使用者層的審查員定義 {c['path']} {who}，不是本專案；kit 不比對、不改這份"
+    return (f"上層 {c['root']} 的審查員定義（{c['path']}）{who}，不是本專案：從 {c['root']} 開 Claude Code 時本專案沒有自己的"
+            "隔離審查員（要用就在本專案根目錄開對話）；kit 不比對、不改這份")
+
+
+def outside_agent_lines(target):
+    """倉庫外定義 → (不同步的提醒行, 不屬於本專案的說明行)（update、claude-review --begin 用）；沒有 → ([], [])。"""
+    stale, info = [], []
     for c in outside_agent_copies(target):
-        if c["synced"]:
-            continue
-        lines.append(f"⚠️ 倉庫外定義 {c['path']} 與專案內版本不同步（套件更新後沒重產）" + (f"：{c['note']}" if c.get("note") else "")
-                     + "。kit 不會改專案外的檔；修法：" + outside_agent_fix(target, c) + "，再重開 Claude Code。")
-    return lines
+        if not c["mine"]:
+            info.append("ℹ️ " + outside_agent_other_text(c) + "。")
+        elif not c["synced"]:
+            stale.append(f"⚠️ 倉庫外定義 {c['path']} 與專案內版本不同步（套件更新後沒重產）" + (f"：{c['note']}" if c.get("note") else "")
+                         + "。kit 不會改專案外的檔；修法：" + outside_agent_fix(target, c) + "，再重開 Claude Code。")
+    return stale, info
 
 
 def do_reviewer_agent(args):
@@ -3116,7 +3255,9 @@ def claude_agent_state(target):
     ok = True
     # 巢狀專案放在對話根的倉庫外定義（R-20261101-1302-4）：不同步＝審查員照舊版做事、檢查卻都看新版
     for c in outside_agent_copies(target):
-        if c["synced"]:
+        if not c["mine"]:
+            notes.append(outside_agent_other_text(c))     # 別的專案的（T-0204-R1-1）：只說明，不列 ✗、不給 --force
+        elif c["synced"]:
             notes.append(f"倉庫外定義同步（{c['path']}）")
         else:
             ok = False

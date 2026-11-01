@@ -32,6 +32,7 @@
 - **守門 hook**：審查員每次用工具前都會先過 `kit.py hook review-guard`，只准新寫 `.ai-review/reviews/R-*.md`（審查開始前就有的報告不准改）、只准跑 git 唯讀指令、kit.py 的 verify／new-id R／state --no-write／checks --run，以及 `config.md` 第 4 節登記的檢查命令原文。被擋的事審查員會寫進報告的「沒做的事」。審查員第一步會先試一條該被擋的指令（`echo guard-canary`），沒被擋就停止審查、回報「守門未生效」。
 - **守門的限制**：它只管 Claude 的工具層。檢查命令啟動的程式（例如 Python 子程序）自己寫檔它看不到，這部分靠審查結束時的審前審後比對抓（印警告、寫進紀錄，不自動刪）。git 設定（例如 `core.fsmonitor`）也可能讓唯讀 git 指令叫外部程式，審查員改不到這些設定。
 - 要求發版前一定要 Codex 審過：`config.md` 第 5 節寫「發版前 gate 需 Codex 審查：是」，發版前跑 `py -3 .ai-review/kit/kit.py gate --require-reviewer codex`，最新審查不是 Codex 審的就不放行。報告檔頭可能是假的，所以它另外用本機紀錄核對：`codex-review` 送審的要有執行紀錄指向那份報告；手動開 Codex 審的（額度不夠或找不到 codex 時的正式退路）沒有這個紀錄，只要那份報告不是隔離 Claude 審查員寫的（守門的寫檔紀錄裡沒有它）就依檔頭採信，並印一行「未見 codex-review 執行紀錄」提醒你（守門沒生效時分辨不出）。紀錄在 `.ai-review/.cache/`、不進版控，所以這是**本機關卡**：CI 上不要帶這個參數。
+- 一般 `gate`（不帶參數）對隔離 Claude 審的報告也用同一處的本機紀錄核對：收尾時守門心跳 0 筆（守門沒生效）、或這台電腦開過這份交接的審查卻沒有這份報告的收尾紀錄（還沒 `claude-review --end`，或用 `--begin --again` 重派後沒收尾）→ 不放行，你確定接受這份審查才加 `--allow-no-guard`；隔離 Claude 審查員寫的報告檔頭卻寫別的審查者（冒充）一律不放行。重派不會清掉這些紀錄。換電腦或 CI 上整台都沒有紀錄時只印提醒、不擋。
 - 同一份交接 Codex 判了「需修正」之後，隔離 Claude 再審判「未發現阻擋問題」**不會**蓋掉它：狀態維持需修正，要重審請用 Codex，或修正後重新交接。`gate` 會印出這份交接的審查歷程。
 - 不想等它自己選：`/review-ready --claude` 強制隔離 Claude；`/review-ready --codex` 強制 Codex。
 
@@ -49,7 +50,7 @@
 | 待獨立審查 | 交接好了，審查員在背景審或還沒啟動 | 等回報；沒在跑就請 Claude 再跑一次 `/review-ready` 的審查步驟 |
 | 需修正 | 審查員找到阻擋級問題 | `/review-fix` |
 | 待複查 | 修好重交了 | 等複查回報 |
-| 本次範圍內未發現阻擋問題 | 這個版本審查員沒找到阻擋問題；後面有「（非 Codex 審查）」＝隔離 Claude 審的 | 可以合併（`gate` 會確認指紋還相符）；發版前要求 Codex 的專案要再送一次 Codex |
+| 本次範圍內未發現阻擋問題 | 這個版本審查員沒找到阻擋問題；後面有「（非 Codex 審查）」＝隔離 Claude 審的 | 可以合併（`gate` 會確認指紋還相符；隔離 Claude 審的另核對守門有生效、有收尾紀錄）；發版前要求 Codex 的專案要再送一次 Codex |
 
 ## 哪些檔要 commit
 

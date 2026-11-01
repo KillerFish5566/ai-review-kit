@@ -96,7 +96,7 @@ argument-hint: "[--recheck R-xxx] [--base <ref>] [--codex | --claude] [一句話
 12. **收結果**（Claude 路線：`--end` 印出結果後；Codex 路線：收到背景結束通知後）：讀它印的審查編號與結論，再讀 `.ai-review/reviews/<R-id>.md`。
    - Claude 路線固定加一句：**本次為隔離 Claude 的獨立審查（非 Codex 審查）。**
    - `needs-fix` → 白話列出阻擋項，問使用者是否 `/review-fix <R-id>`。
-   - `no-blocking-found` → 告訴使用者可以進行合併前的 `gate`（發版前要求 Codex 審查的專案，Claude 路線的結論不能讓 `gate --require-reviewer codex` 放行；這個關卡用本機紀錄核對報告檔頭，`codex-review` 送審或使用者手動開 Codex 審都算）。一般 `gate` 也用本機紀錄核對：隔離 Claude 審查收尾時守門心跳 0 筆（守門未生效）不放行（使用者決定接受才加 `--allow-no-guard`），隔離 Claude 審查員寫的報告檔頭卻不是 `claude-isolated`（冒充）一律不放行。
+   - `no-blocking-found` → 告訴使用者可以進行合併前的 `gate`（發版前要求 Codex 審查的專案，Claude 路線的結論不能讓 `gate --require-reviewer codex` 放行；這個關卡用本機紀錄核對報告檔頭，`codex-review` 送審或使用者手動開 Codex 審都算）。一般 `gate` 也用本機紀錄核對：隔離 Claude 審查收尾時守門心跳 0 筆（守門未生效）、或本機開過這份交接的審查卻沒有這份報告的收尾紀錄（還沒 `claude-review --end`，或重派後沒收尾）不放行（使用者決定接受才加 `--allow-no-guard`；換電腦或 CI 整台沒紀錄只提示），隔離 Claude 審查員寫的報告檔頭卻不是 `claude-isolated`（冒充）一律不放行。
    - 同一份交接 Codex 已判 `needs-fix`，之後隔離 Claude 判 `no-blocking-found`：狀態維持 `needs-fix`（較弱的審查員不能推翻較強的需修正結論）。照實告訴使用者，重審請用 Codex 或修正後重新交接。
    - Codex 路線沒產生報告 → 讀 `.ai-review/.cache/codex-<H-id>.log` 找原因（額度不足、登入過期…）；額度不足就在 `config.md` 第 6 節記「哪份交接尚未審、為什麼」，等額度恢復再跑，或改走 Claude 路線（`--claude`）。
 
